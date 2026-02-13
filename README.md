@@ -86,10 +86,10 @@ print(ranked[0])
 - offset (ms)  
   기준 서버(KRISS) 대비 시간 차이
 
-- delay (ms)
+- delay (ms)  
   네트워크 왕복 지연 시간 (RTT)
 
-- jitter (std_offset_ms)
+- jitter (std_offset_ms)  
   오프셋 변동성 (작을수록 안정적)
 
 ---
