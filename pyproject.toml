@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kntp-lib"
+version = "0.1.0"
+description = "KRISS-based NTP server analysis and recommendation library"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+  { name = "도형" }
+]
+requires-python = ">=3.10"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
