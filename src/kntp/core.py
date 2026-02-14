@@ -1,6 +1,4 @@
-# kntp_lib.py
-# 한국 NTP 비교/추천용 라이브러리 코어
-# Python 3.10+ (3.14 OK)
+"""Core logic for KRISS-based NTP comparison and recommendation."""
 
 from __future__ import annotations
 
@@ -9,14 +7,13 @@ import struct
 import time
 from dataclasses import dataclass
 from statistics import mean, pstdev
-from typing import Dict, List, Optional
 
 NTP_PORT = 123
 NTP_DELTA = 2208988800  # seconds between 1900-01-01 and 1970-01-01
 
 DEFAULT_BASE = "ntp.kriss.re.kr"
 
-DEFAULT_SERVERS: List[str] = [
+DEFAULT_SERVERS: list[str] = [
     # Korea / KR-centric
     "ntp.kriss.re.kr",     # KRISS (기준)
     "kr.pool.ntp.org",     # Korea NTP Pool
@@ -25,7 +22,6 @@ DEFAULT_SERVERS: List[str] = [
     "time.bora.net",       # 국내에서 흔히 사용
     "time.nuri.net",       # 국내에서 흔히 사용
     "clock.iptime.co.kr",  # 환경에 따라 응답/차단 가능
-
     # Global public (fallback/비교용)
     "time.google.com",
     "time.cloudflare.com",
@@ -35,9 +31,14 @@ DEFAULT_SERVERS: List[str] = [
 ]
 
 
+class NTPResponseError(ValueError):
+    """Raised when an NTP response is malformed or not trustworthy."""
+
+
 @dataclass(frozen=True)
 class Sample:
     """단일 측정 결과"""
+
     offset_ms: float  # clock offset (server vs local) in ms
     delay_ms: float   # network delay in ms
 
@@ -45,6 +46,7 @@ class Sample:
 @dataclass(frozen=True)
 class Stats:
     """서버별 통계"""
+
     server: str
     ok: int
     fail: int
@@ -57,6 +59,7 @@ class Stats:
 @dataclass(frozen=True)
 class Ranked:
     """랭킹/추천용 결과(기준 서버 대비)"""
+
     server: str
     ok: int
     fail: int
@@ -88,18 +91,29 @@ def _ntp_to_system(ts_ntp: float) -> float:
     return ts_ntp - NTP_DELTA
 
 
+def _validate_ntp_response(data: bytes, req_sec: int, req_frac: int) -> None:
+    if len(data) < 48:
+        raise NTPResponseError("NTP response too short")
+
+    li_vn_mode = data[0]
+    leap = (li_vn_mode >> 6) & 0b11
+    mode = li_vn_mode & 0b111
+    stratum = data[1]
+
+    if mode != 4:
+        raise NTPResponseError(f"Invalid NTP mode in response: {mode}")
+    if leap == 3:
+        raise NTPResponseError("NTP server clock unsynchronized (LI=3)")
+    if stratum == 0:
+        raise NTPResponseError("NTP Kiss-o'-Death or unspecified stratum (stratum=0)")
+
+    originate_sec, originate_frac = struct.unpack("!II", data[24:32])
+    if (originate_sec, originate_frac) != (req_sec, req_frac):
+        raise NTPResponseError("NTP originate timestamp mismatch")
+
+
 def query_ntp(host: str, timeout: float = 2.0) -> Sample:
-    """
-    NTP 표준 4타임스탬프 방식(offset/delay) 계산.
-
-    T1: client send time (local)
-    T2: server receive time (from packet)
-    T3: server transmit time (from packet)
-    T4: client receive time (local)
-
-    delay  = (T4 - T1) - (T3 - T2)
-    offset = ((T2 - T1) + (T3 - T4)) / 2
-    """
+    """Query one NTP server and compute delay/offset using 4-timestamp equations."""
     addr = (host, NTP_PORT)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.settimeout(timeout)
@@ -107,12 +121,11 @@ def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     packet = bytearray(48)
     packet[0] = 0x23  # LI=0, VN=4, Mode=3(client)
 
-    # client transmit timestamp 채움(서버가 originate 검증에 활용 가능)
     t1 = time.time()
     t1_ntp = _system_to_ntp(t1)
-    sec = int(t1_ntp)
-    frac = int((t1_ntp - sec) * (2**32))
-    struct.pack_into("!II", packet, 40, sec, frac)
+    req_sec = int(t1_ntp)
+    req_frac = int((t1_ntp - req_sec) * (2**32))
+    struct.pack_into("!II", packet, 40, req_sec, req_frac)
 
     try:
         sock.sendto(packet, addr)
@@ -121,14 +134,11 @@ def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     finally:
         sock.close()
 
-    if len(data) < 48:
-        raise ValueError("NTP response too short")
-
+    _validate_ntp_response(data, req_sec=req_sec, req_frac=req_frac)
     u = struct.unpack("!12I", data[:48])
 
-    # T2 (recv): words 8,9 / T3 (tx): words 10,11
-    t2_ntp = u[8] + (u[9] / 2**32)
-    t3_ntp = u[10] + (u[11] / 2**32)
+    t2_ntp = u[8] + (u[9] / 2**32)   # receive timestamp
+    t3_ntp = u[10] + (u[11] / 2**32)  # transmit timestamp
 
     t2 = _ntp_to_system(t2_ntp)
     t3 = _ntp_to_system(t3_ntp)
@@ -140,30 +150,32 @@ def query_ntp(host: str, timeout: float = 2.0) -> Sample:
 
 
 def collect_stats(
-    servers: List[str],
+    servers: list[str],
     samples: int = 5,
     timeout: float = 2.0,
     sleep_between: float = 0.5,
-) -> List[Stats]:
-    """
-    servers 각 서버를 samples번 측정해서 통계를 반환.
-    """
+) -> list[Stats]:
+    """servers 각 서버를 samples번 측정해서 통계를 반환."""
     if samples < 1:
         raise ValueError("samples must be >= 1")
+    if timeout <= 0:
+        raise ValueError("timeout must be > 0")
+    if sleep_between < 0:
+        raise ValueError("sleep_between must be >= 0")
 
-    raw: Dict[str, List[Sample]] = {s: [] for s in servers}
-    fails: Dict[str, int] = {s: 0 for s in servers}
+    raw: dict[str, list[Sample]] = {s: [] for s in servers}
+    fails: dict[str, int] = {s: 0 for s in servers}
 
     for i in range(samples):
         for s in servers:
             try:
                 raw[s].append(query_ntp(s, timeout=timeout))
-            except Exception:
+            except (socket.timeout, socket.gaierror, OSError, struct.error, NTPResponseError):
                 fails[s] += 1
         if i != samples - 1 and sleep_between > 0:
             time.sleep(sleep_between)
 
-    out: List[Stats] = []
+    out: list[Stats] = []
     for s in servers:
         ok = len(raw[s])
         fail = fails[s]
@@ -189,29 +201,24 @@ def collect_stats(
 
 
 def rank_servers(
-    stats: List[Stats],
+    stats: list[Stats],
     base: str = DEFAULT_BASE,
     *,
     w_delay: float = 0.20,
     w_jitter: float = 0.50,
-    max_delay_ms: Optional[float] = 100.0,
+    max_delay_ms: float | None = 100.0,
     allow_base: bool = True,
-) -> List[Ranked]:
-    """
-    기준(base) 대비 점수화해 정렬한 리스트 반환.
-
-    score(작을수록 좋음) =
-        |vs_base_offset| + w_delay*avg_delay + w_jitter*std_offset
-
-    max_delay_ms:
-      - None이면 지연 필터링 없음
-      - 숫자면 avg_delay_ms가 그 이상인 서버는 제외(추천 대상에서 제외)
-    """
+) -> list[Ranked]:
+    """기준(base) 대비 점수화해 정렬한 리스트 반환."""
+    if w_delay < 0 or w_jitter < 0:
+        raise ValueError("w_delay and w_jitter must be >= 0")
+    if max_delay_ms is not None and max_delay_ms <= 0:
+        raise ValueError("max_delay_ms must be > 0 when provided")
     base_stat = next((x for x in stats if x.server == base), None)
     if base_stat is None:
         raise RuntimeError(f"Base server '{base}' stats not found (측정 실패/목록 누락).")
 
-    ranked: List[Ranked] = []
+    ranked: list[Ranked] = []
     for st in stats:
         if not allow_base and st.server == base:
             continue
@@ -242,16 +249,14 @@ def rank_servers(
 
 
 def recommend(
-    ranked: List[Ranked],
+    ranked: list[Ranked],
     *,
     base: str = DEFAULT_BASE,
     require_ok_rate: float = 0.8,
-) -> Optional[Ranked]:
-    """
-    랭킹 결과에서 '추천 1개'를 골라 반환.
-    - base 제외
-    - 성공률(ok/(ok+fail))이 require_ok_rate 미만이면 제외
-    """
+) -> Ranked | None:
+    """랭킹 결과에서 성공률 조건을 만족하는 추천 1개를 반환."""
+    if not 0.0 <= require_ok_rate <= 1.0:
+        raise ValueError("require_ok_rate must be between 0.0 and 1.0")
     for r in ranked:
         if r.server == base:
             continue
@@ -260,3 +265,22 @@ def recommend(
         if ok_rate >= require_ok_rate:
             return r
     return None
+
+
+def format_ranked_table(ranked: list[Ranked], *, top_n: int | None = 5) -> str:
+    """Return a readable text table for ranking results."""
+    if top_n is not None and top_n < 1:
+        raise ValueError("top_n must be >= 1 when provided")
+
+    rows = ranked[:top_n] if top_n is not None else ranked
+    if not rows:
+        return "(no ranked results)"
+
+    header = f"{'rank':<4} {'server':<22} {'score':>8} {'grade':>5} {'vs_base(ms)':>12} {'delay(ms)':>10} {'ok/fail':>8}"
+    lines = [header, "-" * len(header)]
+    for idx, item in enumerate(rows, start=1):
+        lines.append(
+            f"{idx:<4} {item.server:<22} {item.score:>8.2f} {item.grade:>5} "
+            f"{item.vs_base_ms:>12.2f} {item.avg_delay_ms:>10.2f} {item.ok:>2}/{item.fail:<5}"
+        )
+    return "\n".join(lines)
