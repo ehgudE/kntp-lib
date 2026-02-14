@@ -265,3 +265,22 @@ def recommend(
         if ok_rate >= require_ok_rate:
             return r
     return None
+
+
+def format_ranked_table(ranked: list[Ranked], *, top_n: int | None = 5) -> str:
+    """Return a readable text table for ranking results."""
+    if top_n is not None and top_n < 1:
+        raise ValueError("top_n must be >= 1 when provided")
+
+    rows = ranked[:top_n] if top_n is not None else ranked
+    if not rows:
+        return "(no ranked results)"
+
+    header = f"{'rank':<4} {'server':<22} {'score':>8} {'grade':>5} {'vs_base(ms)':>12} {'delay(ms)':>10} {'ok/fail':>8}"
+    lines = [header, "-" * len(header)]
+    for idx, item in enumerate(rows, start=1):
+        lines.append(
+            f"{idx:<4} {item.server:<22} {item.score:>8.2f} {item.grade:>5} "
+            f"{item.vs_base_ms:>12.2f} {item.avg_delay_ms:>10.2f} {item.ok:>2}/{item.fail:<5}"
+        )
+    return "\n".join(lines)

@@ -6,6 +6,7 @@ from .core import (
     Sample,
     Stats,
     collect_stats,
+    format_ranked_table,
     grade,
     query_ntp,
     rank_servers,
@@ -23,5 +24,6 @@ __all__ = [
     "collect_stats",
     "rank_servers",
     "recommend",
+    "format_ranked_table",
     "grade",
 ]

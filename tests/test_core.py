@@ -8,6 +8,7 @@ from kntp.core import (
     Stats,
     _validate_ntp_response,
     collect_stats,
+    format_ranked_table,
     grade,
     rank_servers,
     recommend,
@@ -73,6 +74,33 @@ class CoreTests(unittest.TestCase):
             recommend([], require_ok_rate=-0.1)
         with self.assertRaises(ValueError):
             recommend([], require_ok_rate=1.1)
+
+
+    def test_format_ranked_table(self):
+        ranked = [
+            Ranked("a", ok=3, fail=0, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=5, std_delay_ms=0, vs_base_ms=0.1, score=1.2, grade="A"),
+            Ranked("b", ok=2, fail=1, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=9, std_delay_ms=0, vs_base_ms=-0.2, score=2.3, grade="B"),
+        ]
+        rendered = format_ranked_table(ranked, top_n=1)
+        self.assertIn("rank", rendered)
+        self.assertIn("a", rendered)
+        self.assertNotIn("\n2    b", rendered)
+
+    def test_format_ranked_table_empty(self):
+        self.assertEqual(format_ranked_table([], top_n=None), "(no ranked results)")
+
+    def test_format_ranked_table_top_n_none(self):
+        ranked = [
+            Ranked("a", ok=3, fail=0, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=5, std_delay_ms=0, vs_base_ms=0.1, score=1.2, grade="A"),
+            Ranked("b", ok=2, fail=1, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=9, std_delay_ms=0, vs_base_ms=-0.2, score=2.3, grade="B"),
+        ]
+        rendered = format_ranked_table(ranked, top_n=None)
+        self.assertIn("\n1    a", rendered)
+        self.assertIn("\n2    b", rendered)
+
+    def test_format_ranked_table_validates_top_n(self):
+        with self.assertRaises(ValueError):
+            format_ranked_table([], top_n=0)
 
     @patch("kntp.core.query_ntp", side_effect=[Sample(1, 2), NTPResponseError("bad")])
     def test_collect_stats_counts_failures(self, _mock_query):
