@@ -77,7 +77,8 @@ ranked = kntp.rank_servers(
 )
 
 best = kntp.recommend(ranked, require_ok_rate=0.8)
-print(best)
+print(kntp.format_ranked_table(ranked, top_n=5))
+print("추천:", best.server if best else "None")
 ```
 
 ---
@@ -154,13 +155,10 @@ PYTHONPATH=src python examples/resilient_usage.py
 ## Example Output
 
 ```text
-Ranked(
-    server='kr.pool.ntp.org',
-    avg_offset_ms=-0.8,
-    avg_delay_ms=12.1,
-    score=4.1,
-    grade='A'
-)
+rank server                     score grade  vs_base(ms)  delay(ms)  ok/fail
+---------------------------------------------------------------------------
+1    kr.pool.ntp.org             4.12     A        -0.80      12.10   5/0
+2    time.bora.net               6.45     B         1.23      15.04   5/0
 ```
 
 ---
