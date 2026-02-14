@@ -152,6 +152,76 @@ PYTHONPATH=src python examples/resilient_usage.py
 
 ---
 
+## 한국 개발자용 실전 권장값
+
+사내망/기관망에서 NTP 응답이 불안정할 수 있으므로, 아래처럼 시작하는 것을 권장합니다.
+
+- `samples=5~10`: 일시적인 네트워크 흔들림을 평균화
+- `timeout=1.5~2.5`: 국내망 기준 기본값으로 무난
+- `sleep_between=0.2~0.5`: 서버에 과도한 burst 요청 방지
+- `require_ok_rate=0.7~0.9`: 운영환경 안정성 기준에 맞춰 조정
+
+```python
+import kntp
+
+stats = kntp.collect_stats(
+    kntp.DEFAULT_SERVERS,
+    samples=7,
+    timeout=2.0,
+    sleep_between=0.3,
+)
+
+ranked = kntp.rank_servers(
+    stats,
+    base=kntp.DEFAULT_BASE,
+    w_delay=0.20,
+    w_jitter=0.50,
+    max_delay_ms=120.0,
+)
+
+best = kntp.recommend(ranked, require_ok_rate=0.8)
+print(best)
+```
+
+---
+
+## 예외 처리 패턴 (운영 코드 권장)
+
+네트워크 환경에 따라 일부 서버는 실패할 수 있으므로, 추천 로직을 안전하게 감싸는 패턴을 권장합니다.
+
+```python
+import kntp
+
+try:
+    stats = kntp.collect_stats(kntp.DEFAULT_SERVERS, samples=5, timeout=2.0)
+    ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE)
+    best = kntp.recommend(ranked, require_ok_rate=0.8)
+
+    if best is None:
+        print("추천 가능한 서버가 없습니다. require_ok_rate 또는 samples를 조정하세요.")
+    else:
+        print("추천 서버:", best.server)
+
+except ValueError as e:
+    # 파라미터 오류 (samples/timeout/ok_rate 등)
+    print("입력값 오류:", e)
+except RuntimeError as e:
+    # base 서버 측정 실패 등
+    print("랭킹 계산 실패:", e)
+```
+
+---
+
+## API 파라미터 제약사항
+
+아래 값들은 잘못 입력 시 `ValueError`를 발생시킵니다.
+
+- `collect_stats(samples >= 1, timeout > 0, sleep_between >= 0)`
+- `rank_servers(w_delay >= 0, w_jitter >= 0, max_delay_ms > 0 or None)`
+- `recommend(0.0 <= require_ok_rate <= 1.0)`
+
+---
+
 ## Example Output
 
 ```text
