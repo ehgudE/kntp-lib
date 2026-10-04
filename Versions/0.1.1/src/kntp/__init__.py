@@ -1,5 +1,3 @@
-__version__ = "0.1.2"
-
 from .core import (
     DEFAULT_BASE,
     DEFAULT_SERVERS,
@@ -16,7 +14,6 @@ from .core import (
 )
 
 __all__ = [
-    "__version__",
     "DEFAULT_BASE",
     "DEFAULT_SERVERS",
     "Sample",

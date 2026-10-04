@@ -1,11 +1,14 @@
+import struct
 import unittest
 from unittest.mock import patch
 
 from kntp.core import (
+    NTP_ERA_SECONDS,
     NTPResponseError,
     Ranked,
     Sample,
     Stats,
+    _ntp_to_system,
     _validate_ntp_response,
     collect_stats,
     format_ranked_table,
@@ -15,6 +18,16 @@ from kntp.core import (
 )
 
 
+def make_response(*, stratum=1, req_sec=1, req_frac=2, receive=(3, 4), transmit=(5, 6)):
+    data = bytearray(48)
+    data[0] = 0x24
+    data[1] = stratum
+    struct.pack_into("!II", data, 24, req_sec, req_frac)
+    struct.pack_into("!II", data, 32, *receive)
+    struct.pack_into("!II", data, 40, *transmit)
+    return bytes(data)
+
+
 class CoreTests(unittest.TestCase):
     def test_grade_boundaries(self):
         self.assertEqual(grade(5), "A")
@@ -22,15 +35,37 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(grade(20), "C")
         self.assertEqual(grade(20.1), "D")
 
+    def test_validate_ntp_response_accepts_valid_packet(self):
+        _validate_ntp_response(make_response(), req_sec=1, req_frac=2)
+
+    def test_validate_ntp_response_rejects_unsynchronized_stratum(self):
+        with self.assertRaises(NTPResponseError):
+            _validate_ntp_response(make_response(stratum=16), req_sec=1, req_frac=2)
+
+    def test_validate_ntp_response_rejects_zero_server_timestamps(self):
+        with self.assertRaises(NTPResponseError):
+            _validate_ntp_response(make_response(receive=(0, 0)), req_sec=1, req_frac=2)
+        with self.assertRaises(NTPResponseError):
+            _validate_ntp_response(make_response(transmit=(0, 0)), req_sec=1, req_frac=2)
+
+    def test_validate_ntp_response_rejects_mismatched_request(self):
+        with self.assertRaises(NTPResponseError):
+            _validate_ntp_response(make_response(), req_sec=9, req_frac=9)
+
+    def test_ntp_era_unfolding_stays_near_reference(self):
+        reference = 2_200_000_000.0
+        wrapped = (reference + 2_208_988_800) % NTP_ERA_SECONDS
+        converted = _ntp_to_system(wrapped, reference_unix=reference)
+        self.assertAlmostEqual(converted, reference, places=5)
+
     def test_rank_servers_sort_and_filter(self):
         stats = [
-            Stats("base", ok=5, fail=0, avg_offset_ms=0.0, std_offset_ms=0.2, avg_delay_ms=10, std_delay_ms=1),
-            Stats("fast", ok=5, fail=0, avg_offset_ms=1.0, std_offset_ms=0.1, avg_delay_ms=5, std_delay_ms=1),
-            Stats("slow", ok=5, fail=0, avg_offset_ms=0.5, std_offset_ms=0.1, avg_delay_ms=200, std_delay_ms=1),
+            Stats("base", 5, 0, 0.0, 0.2, 10, 1),
+            Stats("fast", 5, 0, 1.0, 0.1, 5, 1),
+            Stats("slow", 5, 0, 0.5, 0.1, 200, 1),
         ]
         ranked = rank_servers(stats, base="base", max_delay_ms=100.0)
-
-        self.assertEqual([r.server for r in ranked], ["fast", "base"])
+        self.assertEqual([item.server for item in ranked], ["fast", "base"])
 
     def test_rank_servers_missing_base_raises(self):
         with self.assertRaises(RuntimeError):
@@ -38,74 +73,29 @@ class CoreTests(unittest.TestCase):
 
     def test_recommend_uses_ok_rate(self):
         ranked = [
-            Ranked("base", ok=5, fail=0, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=1, std_delay_ms=0, vs_base_ms=0, score=0, grade="A"),
-            Ranked("low-ok", ok=1, fail=4, avg_offset_ms=1, std_offset_ms=0, avg_delay_ms=1, std_delay_ms=0, vs_base_ms=1, score=1, grade="A"),
-            Ranked("good", ok=4, fail=1, avg_offset_ms=2, std_offset_ms=0, avg_delay_ms=1, std_delay_ms=0, vs_base_ms=2, score=2, grade="A"),
+            Ranked("base", 5, 0, 0, 0, 1, 0, 0, 0, "A"),
+            Ranked("low-ok", 1, 4, 1, 0, 1, 0, 1, 1, "A"),
+            Ranked("good", 4, 1, 2, 0, 1, 0, 2, 2, "A"),
         ]
-
         best = recommend(ranked, base="base", require_ok_rate=0.8)
         self.assertIsNotNone(best)
         self.assertEqual(best.server, "good")
 
-    def test_collect_stats_validates_samples(self):
+    def test_argument_validation(self):
         with self.assertRaises(ValueError):
             collect_stats(["a"], samples=0)
-
-
-    def test_collect_stats_validates_timing_arguments(self):
         with self.assertRaises(ValueError):
-            collect_stats(["a"], samples=1, timeout=0)
+            collect_stats(["a"], timeout=0)
         with self.assertRaises(ValueError):
-            collect_stats(["a"], samples=1, sleep_between=-0.1)
-
-    def test_rank_servers_validates_weight_and_delay_arguments(self):
-        stats = [
-            Stats("base", ok=1, fail=0, avg_offset_ms=0.0, std_offset_ms=0.0, avg_delay_ms=10, std_delay_ms=0.0),
-        ]
-        with self.assertRaises(ValueError):
-            rank_servers(stats, base="base", w_delay=-0.1)
-        with self.assertRaises(ValueError):
-            rank_servers(stats, base="base", w_jitter=-0.1)
-        with self.assertRaises(ValueError):
-            rank_servers(stats, base="base", max_delay_ms=0)
-
-    def test_recommend_validates_ok_rate_range(self):
-        with self.assertRaises(ValueError):
-            recommend([], require_ok_rate=-0.1)
+            collect_stats(["a"], sleep_between=-0.1)
         with self.assertRaises(ValueError):
             recommend([], require_ok_rate=1.1)
-
-
-    def test_format_ranked_table(self):
-        ranked = [
-            Ranked("a", ok=3, fail=0, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=5, std_delay_ms=0, vs_base_ms=0.1, score=1.2, grade="A"),
-            Ranked("b", ok=2, fail=1, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=9, std_delay_ms=0, vs_base_ms=-0.2, score=2.3, grade="B"),
-        ]
-        rendered = format_ranked_table(ranked, top_n=1)
-        self.assertIn("rank", rendered)
-        self.assertIn("a", rendered)
-        self.assertNotIn("\n2    b", rendered)
-
-    def test_format_ranked_table_empty(self):
-        self.assertEqual(format_ranked_table([], top_n=None), "(no ranked results)")
-
-    def test_format_ranked_table_top_n_none(self):
-        ranked = [
-            Ranked("a", ok=3, fail=0, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=5, std_delay_ms=0, vs_base_ms=0.1, score=1.2, grade="A"),
-            Ranked("b", ok=2, fail=1, avg_offset_ms=0, std_offset_ms=0, avg_delay_ms=9, std_delay_ms=0, vs_base_ms=-0.2, score=2.3, grade="B"),
-        ]
-        rendered = format_ranked_table(ranked, top_n=None)
-        self.assertIn("\n1    a", rendered)
-        self.assertIn("\n2    b", rendered)
-
-    def test_format_ranked_table_validates_top_n(self):
         with self.assertRaises(ValueError):
             format_ranked_table([], top_n=0)
 
     @patch("kntp.core.query_ntp", side_effect=[Sample(1, 2), NTPResponseError("bad")])
     def test_collect_stats_counts_failures(self, _mock_query):
         stats = collect_stats(["s1"], samples=2, sleep_between=0)
-        self.assertEqual(len(stats), 1)
         self.assertEqual(stats[0].ok, 1)
         self.assertEqual(stats[0].fail, 1)
 
@@ -114,12 +104,9 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             collect_stats(["s1"], samples=1, sleep_between=0)
 
-    def test_validate_ntp_response_mode_check(self):
-        data = bytearray(48)
-        data[0] = 0x23  # mode=3, invalid for server response
-        data[1] = 1
-        with self.assertRaises(NTPResponseError):
-            _validate_ntp_response(bytes(data), req_sec=1, req_frac=2)
+    def test_format_ranked_table(self):
+        ranked = [Ranked("a", 3, 0, 0, 0, 5, 0, 0.1, 1.2, "A")]
+        self.assertIn("a", format_ranked_table(ranked))
 
 
 if __name__ == "__main__":

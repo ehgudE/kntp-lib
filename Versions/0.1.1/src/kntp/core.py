@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import socket
 import struct
 import time
@@ -10,19 +9,20 @@ from dataclasses import dataclass
 from statistics import mean, pstdev
 
 NTP_PORT = 123
-NTP_DELTA = 2208988800
-NTP_ERA_SECONDS = 2**32
+NTP_DELTA = 2208988800  # seconds between 1900-01-01 and 1970-01-01
 
 DEFAULT_BASE = "ntp.kriss.re.kr"
 
 DEFAULT_SERVERS: list[str] = [
-    "ntp.kriss.re.kr",
-    "kr.pool.ntp.org",
-    "asia.pool.ntp.org",
-    "pool.ntp.org",
-    "time.bora.net",
-    "time.nuri.net",
-    "clock.iptime.co.kr",
+    # Korea / KR-centric
+    "ntp.kriss.re.kr",     # KRISS (기준)
+    "kr.pool.ntp.org",     # Korea NTP Pool
+    "asia.pool.ntp.org",   # Asia NTP Pool
+    "pool.ntp.org",        # Global NTP Pool
+    "time.bora.net",       # 국내에서 흔히 사용
+    "time.nuri.net",       # 국내에서 흔히 사용
+    "clock.iptime.co.kr",  # 환경에 따라 응답/차단 가능
+    # Global public (fallback/비교용)
     "time.google.com",
     "time.cloudflare.com",
     "time.windows.com",
@@ -37,15 +37,15 @@ class NTPResponseError(ValueError):
 
 @dataclass(frozen=True)
 class Sample:
-    """단일 측정 결과."""
+    """단일 측정 결과"""
 
-    offset_ms: float
-    delay_ms: float
+    offset_ms: float  # clock offset (server vs local) in ms
+    delay_ms: float   # network delay in ms
 
 
 @dataclass(frozen=True)
 class Stats:
-    """서버별 통계."""
+    """서버별 통계"""
 
     server: str
     ok: int
@@ -58,7 +58,7 @@ class Stats:
 
 @dataclass(frozen=True)
 class Ranked:
-    """랭킹/추천용 결과(기준 서버 대비)."""
+    """랭킹/추천용 결과(기준 서버 대비)"""
 
     server: str
     ok: int
@@ -73,7 +73,7 @@ class Ranked:
 
 
 def grade(score: float) -> str:
-    """점수 기반 등급(A가 가장 좋음)."""
+    """점수 기반 등급(A가 가장 좋음). 필요하면 사용자 환경에 맞게 조정."""
     if score <= 5:
         return "A"
     if score <= 10:
@@ -87,11 +87,8 @@ def _system_to_ntp(ts_unix: float) -> float:
     return ts_unix + NTP_DELTA
 
 
-def _ntp_to_system(ts_ntp: float, *, reference_unix: float) -> float:
-    """Convert a 32-bit NTP timestamp using the era nearest reference_unix."""
-    reference_ntp = _system_to_ntp(reference_unix)
-    era = round((reference_ntp - ts_ntp) / NTP_ERA_SECONDS)
-    return ts_ntp + (era * NTP_ERA_SECONDS) - NTP_DELTA
+def _ntp_to_system(ts_ntp: float) -> float:
+    return ts_ntp - NTP_DELTA
 
 
 def _validate_ntp_response(data: bytes, req_sec: int, req_frac: int) -> None:
@@ -107,81 +104,49 @@ def _validate_ntp_response(data: bytes, req_sec: int, req_frac: int) -> None:
         raise NTPResponseError(f"Invalid NTP mode in response: {mode}")
     if leap == 3:
         raise NTPResponseError("NTP server clock unsynchronized (LI=3)")
-    if not 1 <= stratum <= 15:
-        raise NTPResponseError(f"Invalid or unsynchronized NTP stratum: {stratum}")
+    if stratum == 0:
+        raise NTPResponseError("NTP Kiss-o'-Death or unspecified stratum (stratum=0)")
 
     originate_sec, originate_frac = struct.unpack("!II", data[24:32])
     if (originate_sec, originate_frac) != (req_sec, req_frac):
         raise NTPResponseError("NTP originate timestamp mismatch")
 
-    receive_sec, receive_frac = struct.unpack("!II", data[32:40])
-    transmit_sec, transmit_frac = struct.unpack("!II", data[40:48])
-    if (receive_sec, receive_frac) == (0, 0):
-        raise NTPResponseError("NTP receive timestamp is zero")
-    if (transmit_sec, transmit_frac) == (0, 0):
-        raise NTPResponseError("NTP transmit timestamp is zero")
-
-
-def _connect_udp(host: str, timeout: float) -> socket.socket:
-    """Open a connected IPv4/IPv6 UDP socket so packets only come from the peer."""
-    last_error: OSError | None = None
-    for family, socktype, proto, _, sockaddr in socket.getaddrinfo(
-        host, NTP_PORT, type=socket.SOCK_DGRAM
-    ):
-        sock = socket.socket(family, socktype, proto)
-        sock.settimeout(timeout)
-        try:
-            sock.connect(sockaddr)
-            return sock
-        except OSError as exc:
-            last_error = exc
-            sock.close()
-    if last_error is not None:
-        raise last_error
-    raise socket.gaierror(f"No UDP address found for {host}")
-
 
 def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     """Query one NTP server and compute delay/offset using 4-timestamp equations."""
-    if timeout <= 0:
-        raise ValueError("timeout must be > 0")
+    addr = (host, NTP_PORT)
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.settimeout(timeout)
 
-    sock = _connect_udp(host, timeout)
     packet = bytearray(48)
-    packet[0] = 0x23
+    packet[0] = 0x23  # LI=0, VN=4, Mode=3(client)
 
     t1 = time.time()
     t1_ntp = _system_to_ntp(t1)
-    req_sec_full = int(t1_ntp)
-    req_sec = req_sec_full % NTP_ERA_SECONDS
-    req_frac = int((t1_ntp - req_sec_full) * NTP_ERA_SECONDS)
+    req_sec = int(t1_ntp)
+    req_frac = int((t1_ntp - req_sec) * (2**32))
     struct.pack_into("!II", packet, 40, req_sec, req_frac)
 
     try:
-        sock.send(packet)
-        data = sock.recv(512)
+        sock.sendto(packet, addr)
+        data, _ = sock.recvfrom(512)
         t4 = time.time()
     finally:
         sock.close()
 
     _validate_ntp_response(data, req_sec=req_sec, req_frac=req_frac)
     u = struct.unpack("!12I", data[:48])
-    t2_ntp = u[8] + (u[9] / NTP_ERA_SECONDS)
-    t3_ntp = u[10] + (u[11] / NTP_ERA_SECONDS)
 
-    t2 = _ntp_to_system(t2_ntp, reference_unix=t1)
-    t3 = _ntp_to_system(t3_ntp, reference_unix=t4)
-    if t3 < t2:
-        raise NTPResponseError("NTP transmit timestamp precedes receive timestamp")
+    t2_ntp = u[8] + (u[9] / 2**32)   # receive timestamp
+    t3_ntp = u[10] + (u[11] / 2**32)  # transmit timestamp
+
+    t2 = _ntp_to_system(t2_ntp)
+    t3 = _ntp_to_system(t3_ntp)
 
     delay = (t4 - t1) - (t3 - t2)
     offset = ((t2 - t1) + (t3 - t4)) / 2
-    if not math.isfinite(delay) or not math.isfinite(offset):
-        raise NTPResponseError("NTP calculation produced a non-finite value")
-    if delay < -0.001:
-        raise NTPResponseError("NTP calculation produced an invalid negative delay")
 
-    return Sample(offset_ms=offset * 1000.0, delay_ms=max(0.0, delay * 1000.0))
+    return Sample(offset_ms=offset * 1000.0, delay_ms=delay * 1000.0)
 
 
 def collect_stats(
@@ -202,34 +167,36 @@ def collect_stats(
     fails: dict[str, int] = {s: 0 for s in servers}
 
     for i in range(samples):
-        for server in servers:
+        for s in servers:
             try:
-                raw[server].append(query_ntp(server, timeout=timeout))
+                raw[s].append(query_ntp(s, timeout=timeout))
             except (socket.timeout, socket.gaierror, OSError, struct.error, NTPResponseError):
-                fails[server] += 1
+                fails[s] += 1
         if i != samples - 1 and sleep_between > 0:
             time.sleep(sleep_between)
 
     out: list[Stats] = []
-    for server in servers:
-        ok = len(raw[server])
-        fail = fails[server]
+    for s in servers:
+        ok = len(raw[s])
+        fail = fails[s]
         if ok == 0:
             continue
 
-        offsets = [sample.offset_ms for sample in raw[server]]
-        delays = [sample.delay_ms for sample in raw[server]]
+        offs = [x.offset_ms for x in raw[s]]
+        dels = [x.delay_ms for x in raw[s]]
+
         out.append(
             Stats(
-                server=server,
+                server=s,
                 ok=ok,
                 fail=fail,
-                avg_offset_ms=mean(offsets),
-                std_offset_ms=pstdev(offsets) if ok > 1 else 0.0,
-                avg_delay_ms=mean(delays),
-                std_delay_ms=pstdev(delays) if ok > 1 else 0.0,
+                avg_offset_ms=mean(offs),
+                std_offset_ms=pstdev(offs) if ok > 1 else 0.0,
+                avg_delay_ms=mean(dels),
+                std_delay_ms=pstdev(dels) if ok > 1 else 0.0,
             )
         )
+
     return out
 
 
@@ -247,34 +214,37 @@ def rank_servers(
         raise ValueError("w_delay and w_jitter must be >= 0")
     if max_delay_ms is not None and max_delay_ms <= 0:
         raise ValueError("max_delay_ms must be > 0 when provided")
-
-    base_stat = next((item for item in stats if item.server == base), None)
+    base_stat = next((x for x in stats if x.server == base), None)
     if base_stat is None:
         raise RuntimeError(f"Base server '{base}' stats not found (측정 실패/목록 누락).")
 
     ranked: list[Ranked] = []
-    for item in stats:
-        if not allow_base and item.server == base:
+    for st in stats:
+        if not allow_base and st.server == base:
             continue
-        vs_base = item.avg_offset_ms - base_stat.avg_offset_ms
-        score = abs(vs_base) + (w_delay * item.avg_delay_ms) + (w_jitter * item.std_offset_ms)
-        if max_delay_ms is not None and item.avg_delay_ms >= max_delay_ms:
+
+        vs_base = st.avg_offset_ms - base_stat.avg_offset_ms
+        score = abs(vs_base) + (w_delay * st.avg_delay_ms) + (w_jitter * st.std_offset_ms)
+
+        if max_delay_ms is not None and st.avg_delay_ms >= max_delay_ms:
             continue
+
         ranked.append(
             Ranked(
-                server=item.server,
-                ok=item.ok,
-                fail=item.fail,
-                avg_offset_ms=item.avg_offset_ms,
-                std_offset_ms=item.std_offset_ms,
-                avg_delay_ms=item.avg_delay_ms,
-                std_delay_ms=item.std_delay_ms,
+                server=st.server,
+                ok=st.ok,
+                fail=st.fail,
+                avg_offset_ms=st.avg_offset_ms,
+                std_offset_ms=st.std_offset_ms,
+                avg_delay_ms=st.avg_delay_ms,
+                std_delay_ms=st.std_delay_ms,
                 vs_base_ms=vs_base,
                 score=score,
                 grade=grade(score),
             )
         )
-    ranked.sort(key=lambda item: item.score)
+
+    ranked.sort(key=lambda x: x.score)
     return ranked
 
 
@@ -287,13 +257,13 @@ def recommend(
     """랭킹 결과에서 성공률 조건을 만족하는 추천 1개를 반환."""
     if not 0.0 <= require_ok_rate <= 1.0:
         raise ValueError("require_ok_rate must be between 0.0 and 1.0")
-    for item in ranked:
-        if item.server == base:
+    for r in ranked:
+        if r.server == base:
             continue
-        total = item.ok + item.fail
-        ok_rate = (item.ok / total) if total > 0 else 0.0
+        total = r.ok + r.fail
+        ok_rate = (r.ok / total) if total > 0 else 0.0
         if ok_rate >= require_ok_rate:
-            return item
+            return r
     return None
 
 
@@ -301,15 +271,16 @@ def format_ranked_table(ranked: list[Ranked], *, top_n: int | None = 5) -> str:
     """Return a readable text table for ranking results."""
     if top_n is not None and top_n < 1:
         raise ValueError("top_n must be >= 1 when provided")
+
     rows = ranked[:top_n] if top_n is not None else ranked
     if not rows:
         return "(no ranked results)"
 
     header = f"{'rank':<4} {'server':<22} {'score':>8} {'grade':>5} {'vs_base(ms)':>12} {'delay(ms)':>10} {'ok/fail':>8}"
     lines = [header, "-" * len(header)]
-    for index, item in enumerate(rows, start=1):
+    for idx, item in enumerate(rows, start=1):
         lines.append(
-            f"{index:<4} {item.server:<22} {item.score:>8.2f} {item.grade:>5} "
+            f"{idx:<4} {item.server:<22} {item.score:>8.2f} {item.grade:>5} "
             f"{item.vs_base_ms:>12.2f} {item.avg_delay_ms:>10.2f} {item.ok:>2}/{item.fail:<5}"
         )
     return "\n".join(lines)
