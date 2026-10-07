@@ -10,7 +10,7 @@ KRISS(한국표준과학연구원)를 기준으로 NTP 서버의 정확도, 지�
 
 - NTP 4-timestamp 공식 기반 offset 및 delay 계산
 - IPv4와 IPv6 UDP 연결 지원
-- 응답 출발지 고정과 NTP v3/v4·비동기 stratum·비정상 timestamp 검증
+- 응답 출발지 고정과 비동기 stratum·비정상 timestamp 검증
 - 2036년 NTP era rollover 처리
 - 서버별 평균·표준편차, 점수 기반 순위와 A–D 등급
 - 성공률 조건을 적용한 추천 서버 선택
@@ -68,11 +68,7 @@ else:
 
 ## API 제약사항
 
-- 서버 수: 1–64개
-- `samples`: 1–50
-- 서버 수 × `samples`: 최대 100회
-- `timeout`: 0초 초과, 10초 이하
-- `sleep_between`: 0–5초
+- `collect_stats(): samples >= 1, timeout > 0, sleep_between >= 0`
 - `rank_servers(): w_delay >= 0, w_jitter >= 0, max_delay_ms > 0 또는 None`
 - `recommend(): 0.0 <= require_ok_rate <= 1.0`
 - `format_ranked_table(): top_n >= 1 또는 None`
@@ -90,9 +86,7 @@ ranked = kntp.rank_servers(stats, base="ntp.kriss.re.kr")
 - NTP는 UDP 123 포트를 사용하므로 방화벽에서 차단될 수 있습니다.
 - 연결된 UDP 소켓과 originate timestamp 검증으로 다른 출발지 및 요청과 무관한 응답을 거부합니다.
 - 일반 NTP에는 암호학적 서버 인증이 없습니다. 공격자에 대한 인증이 필요한 환경에서는 NTS(Network Time Security)를 사용해야 합니다.
-- 측정 결과를 인증서, 토큰 만료, 금융 거래, 감사 로그처럼 보안상 중요한 시각 판단에 사용하지 마세요.
 - 이 라이브러리는 시스템 시계를 변경하지 않고 측정·비교만 수행합니다.
-- 외부 사용자가 서버 목록이나 측정 횟수를 지정하는 서비스에서는 애플리케이션 계층의 추가 요청 제한도 적용하세요.
 
 ## 테스트
 
@@ -102,7 +96,7 @@ PYTHONPATH=src python -m unittest discover -s tests -v
 
 ## 버전 보존
 
-이전 소스 버전은 `Versions/<버전>`에 보존합니다. 보존 버전은 기록용이며 최신 보안 수정이 포함되지 않을 수 있습니다. 최신 패키지 소스는 저장소 기본 위치에 있습니다.
+이전 소스 버전은 `Versions/<버전>`에 보존합니다. 최신 패키지 소스는 저장소 기본 위치에 있습니다.
 
 ## 라이선스
 

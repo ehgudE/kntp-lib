@@ -13,12 +13,6 @@ NTP_PORT = 123
 NTP_DELTA = 2208988800
 NTP_ERA_SECONDS = 2**32
 
-MAX_SERVERS = 64
-MAX_SAMPLES = 50
-MAX_TIMEOUT = 10.0
-MAX_SLEEP_BETWEEN = 5.0
-MAX_TOTAL_PROBES = 100
-
 DEFAULT_BASE = "ntp.kriss.re.kr"
 
 DEFAULT_SERVERS: list[str] = [
@@ -106,12 +100,9 @@ def _validate_ntp_response(data: bytes, req_sec: int, req_frac: int) -> None:
 
     li_vn_mode = data[0]
     leap = (li_vn_mode >> 6) & 0b11
-    version = (li_vn_mode >> 3) & 0b111
     mode = li_vn_mode & 0b111
     stratum = data[1]
 
-    if version not in (3, 4):
-        raise NTPResponseError(f"Unsupported NTP version in response: {version}")
     if mode != 4:
         raise NTPResponseError(f"Invalid NTP mode in response: {mode}")
     if leap == 3:
@@ -152,12 +143,8 @@ def _connect_udp(host: str, timeout: float) -> socket.socket:
 
 def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     """Query one NTP server and compute delay/offset using 4-timestamp equations."""
-    if not isinstance(host, str) or not host.strip():
-        raise ValueError("host must be a non-empty string")
-    if len(host) > 253:
-        raise ValueError("host must be at most 253 characters")
-    if not 0 < timeout <= MAX_TIMEOUT:
-        raise ValueError(f"timeout must be > 0 and <= {MAX_TIMEOUT}")
+    if timeout <= 0:
+        raise ValueError("timeout must be > 0")
 
     sock = _connect_udp(host, timeout)
     packet = bytearray(48)
@@ -204,16 +191,12 @@ def collect_stats(
     sleep_between: float = 0.5,
 ) -> list[Stats]:
     """servers 각 서버를 samples번 측정해서 통계를 반환."""
-    if not 1 <= len(servers) <= MAX_SERVERS:
-        raise ValueError(f"servers count must be between 1 and {MAX_SERVERS}")
-    if not 1 <= samples <= MAX_SAMPLES:
-        raise ValueError(f"samples must be between 1 and {MAX_SAMPLES}")
-    if len(servers) * samples > MAX_TOTAL_PROBES:
-        raise ValueError(f"servers * samples must be <= {MAX_TOTAL_PROBES}")
-    if not 0 < timeout <= MAX_TIMEOUT:
-        raise ValueError(f"timeout must be > 0 and <= {MAX_TIMEOUT}")
-    if not 0 <= sleep_between <= MAX_SLEEP_BETWEEN:
-        raise ValueError(f"sleep_between must be between 0 and {MAX_SLEEP_BETWEEN}")
+    if samples < 1:
+        raise ValueError("samples must be >= 1")
+    if timeout <= 0:
+        raise ValueError("timeout must be > 0")
+    if sleep_between < 0:
+        raise ValueError("sleep_between must be >= 0")
 
     raw: dict[str, list[Sample]] = {s: [] for s in servers}
     fails: dict[str, int] = {s: 0 for s in servers}

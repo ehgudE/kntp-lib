@@ -18,9 +18,9 @@ from kntp.core import (
 )
 
 
-def make_response(*, version=4, stratum=1, req_sec=1, req_frac=2, receive=(3, 4), transmit=(5, 6)):
+def make_response(*, stratum=1, req_sec=1, req_frac=2, receive=(3, 4), transmit=(5, 6)):
     data = bytearray(48)
-    data[0] = (version << 3) | 4
+    data[0] = 0x24
     data[1] = stratum
     struct.pack_into("!II", data, 24, req_sec, req_frac)
     struct.pack_into("!II", data, 32, *receive)
@@ -37,10 +37,6 @@ class CoreTests(unittest.TestCase):
 
     def test_validate_ntp_response_accepts_valid_packet(self):
         _validate_ntp_response(make_response(), req_sec=1, req_frac=2)
-
-    def test_validate_ntp_response_rejects_unsupported_version(self):
-        with self.assertRaises(NTPResponseError):
-            _validate_ntp_response(make_response(version=0), req_sec=1, req_frac=2)
 
     def test_validate_ntp_response_rejects_unsynchronized_stratum(self):
         with self.assertRaises(NTPResponseError):
@@ -92,18 +88,6 @@ class CoreTests(unittest.TestCase):
             collect_stats(["a"], timeout=0)
         with self.assertRaises(ValueError):
             collect_stats(["a"], sleep_between=-0.1)
-        with self.assertRaises(ValueError):
-            collect_stats([], samples=1)
-        with self.assertRaises(ValueError):
-            collect_stats(["a"] * 65, samples=1)
-        with self.assertRaises(ValueError):
-            collect_stats(["a"] * 11, samples=10)
-        with self.assertRaises(ValueError):
-            collect_stats(["a"], samples=51)
-        with self.assertRaises(ValueError):
-            collect_stats(["a"], timeout=10.1)
-        with self.assertRaises(ValueError):
-            collect_stats(["a"], sleep_between=5.1)
         with self.assertRaises(ValueError):
             recommend([], require_ok_rate=1.1)
         with self.assertRaises(ValueError):
