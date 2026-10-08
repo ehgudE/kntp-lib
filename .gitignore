@@ -5,3 +5,8 @@ __pycache__/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Local environment files may contain secrets.
+.env
+.env.*
+!.env.example
