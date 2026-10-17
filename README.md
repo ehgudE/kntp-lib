@@ -1,5 +1,5 @@
 [![PyPI](https://img.shields.io/pypi/v/kntp-lib?style=flat-square)](https://pypi.org/project/kntp-lib/)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-3776AB?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/kntp-lib/)
+[![Python 3.11–3.15](https://img.shields.io/badge/python-3.11--3.15-3776AB?style=flat-square&logo=python&logoColor=white)](https://pypi.org/project/kntp-lib/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 # kntp-lib
@@ -14,6 +14,12 @@ KRISS(한국표준과학연구원)를 기준으로 NTP 서버의 정확도, 지�
 - 2036년 NTP era rollover 처리
 - 서버별 평균·표준편차, 점수 기반 순위와 A–D 등급
 - 성공률 조건을 적용한 추천 서버 선택
+
+## 지원 환경
+
+- Python 3.11–3.15
+- Python 3.10은 2026년 10월 보안 지원 종료로 인해 지원하지 않습니다.
+- CI는 각 지원 Python 버전에서 소스 테스트, sdist·wheel 빌드, 재빌드 wheel 설치 및 메타데이터 검사를 수행합니다.
 
 ## 설치
 
@@ -98,11 +104,17 @@ ranked = kntp.rank_servers(stats, base="ntp.kriss.re.kr")
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
+python -m build
+python -m twine check dist/*
 ```
 
 ## 버전 보존
 
 이전 소스 버전은 `Versions/<버전>`에 보존합니다. 보존 버전은 기록용이며 최신 보안 수정이 포함되지 않을 수 있습니다. 최신 패키지 소스는 저장소 기본 위치에 있습니다.
+
+## 배포 보안
+
+PyPI 배포를 자동화할 경우 장기 API 토큰을 저장하지 말고 PyPI Trusted Publishing(OIDC)을 사용하세요. 빌드·테스트 작업과 배포 작업은 서로 다른 job으로 분리하고, 배포 job에만 `id-token: write` 권한을 부여해야 합니다.
 
 ## 라이선스
 
