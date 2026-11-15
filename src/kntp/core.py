@@ -18,6 +18,7 @@ MAX_SAMPLES = 50
 MAX_TIMEOUT = 10.0
 MAX_SLEEP_BETWEEN = 5.0
 MAX_TOTAL_PROBES = 240  # DEFAULT_SERVERS(12) x 20 samples
+MAX_RECOMMEND_COUNT = 10
 
 OFFSET_METHODS = ("mean", "min_delay")
 
@@ -79,6 +80,8 @@ class Stats:
     std_delay_ms: float
     min_delay_offset_ms: float | None = None
     """delay가 가장 작았던 샘플의 offset. 경로 지연·비대칭 영향이 가장 적은 값."""
+    min_delay_ms: float | None = None
+    """가장 작은 delay(min_delay_offset_ms를 얻은 샘플의 delay)."""
 
 
 @dataclass(frozen=True)
@@ -97,6 +100,10 @@ class Ranked:
     grade: str
     base: str | None = None
     """이 결과를 계산할 때 기준으로 쓴 서버. recommend()가 기준 서버를 건너뛰는 데 사용."""
+    uncertainty_ms: float | None = None
+    """vs_base_ms의 오차 상한(±). 경로 비대칭 때문에 생길 수 있는 최대 오차로,
+    (이 서버의 delay + 기준 서버의 delay) / 2 이다. |vs_base_ms|가 이 값보다 작으면
+    기준 서버와의 차이를 측정으로 구분할 수 없다는 뜻이다."""
 
 
 def grade(score: float) -> str:
@@ -315,6 +322,7 @@ def collect_stats(
                 avg_delay_ms=mean(delays),
                 std_delay_ms=pstdev(delays) if ok > 1 else 0.0,
                 min_delay_offset_ms=best_sample.offset_ms,
+                min_delay_ms=best_sample.delay_ms,
             )
         )
     return out
@@ -346,6 +354,9 @@ def rank_servers(
     min_base_ok_rate:
         기준 서버의 최소 성공률. 이보다 낮으면 기준값을 믿을 수 없으므로 RuntimeError.
 
+    각 결과의 uncertainty_ms에는 vs_base_ms의 오차 상한(±)을 기록한다. NTP는 왕복 경로가
+    대칭이라고 가정하므로, 경로가 비대칭이면 offset이 최대 delay/2만큼 틀릴 수 있다.
+
     jitter 항목은 offset 표준편차를 쓴다. 성공 샘플이 1개뿐이면 표준편차를 알 수 없으므로
     NTP 오차 상한인 delay/2를 대신 쓴다(샘플이 적은 서버가 유리해지지 않도록).
     """
@@ -373,12 +384,18 @@ def rank_servers(
             return item.min_delay_offset_ms
         return item.avg_offset_ms
 
+    def delay_of(item: Stats) -> float:
+        if offset_method == "min_delay" and item.min_delay_ms is not None:
+            return item.min_delay_ms
+        return item.avg_delay_ms
+
     def jitter_of(item: Stats) -> float:
         if item.ok > 1:
             return item.std_offset_ms
         return item.avg_delay_ms / 2
 
     base_offset = offset_of(base_stat)
+    base_half_delay = delay_of(base_stat) / 2
     ranked: list[Ranked] = []
     for item in stats:
         if not allow_base and item.server == base:
@@ -386,6 +403,10 @@ def rank_servers(
         if max_delay_ms is not None and item.avg_delay_ms >= max_delay_ms:
             continue
         vs_base = offset_of(item) - base_offset
+        if item.server == base:
+            uncertainty = 0.0
+        else:
+            uncertainty = delay_of(item) / 2 + base_half_delay
         score = abs(vs_base) + (w_delay * item.avg_delay_ms) + (w_jitter * jitter_of(item))
         ranked.append(
             Ranked(
@@ -400,6 +421,7 @@ def rank_servers(
                 score=score,
                 grade=grade(score),
                 base=base,
+                uncertainty_ms=uncertainty,
             )
         )
     ranked.sort(key=lambda item: item.score)
@@ -428,6 +450,35 @@ def recommend(
     return None
 
 
+def recommend_set(
+    ranked: list[Ranked],
+    *,
+    count: int = 3,
+    base: str | None = None,
+    require_ok_rate: float = 0.8,
+) -> list[Ranked]:
+    """기준 서버와 함께 쓸 보조 서버를 점수 순으로 최대 count개 반환.
+
+    NTP 클라이언트(chrony, ntpd 등)는 서버가 3~4개 이상일 때 이상한 서버(falseticker)를
+    걸러낼 수 있으므로, 서버 1개 대신 여러 개를 함께 설정하는 것이 권장된다.
+    기준 서버는 결과에 넣지 않는다. 조건을 만족하는 서버가 적으면 count보다 적게 반환한다.
+    """
+    if isinstance(count, bool) or not isinstance(count, int) or not 1 <= count <= MAX_RECOMMEND_COUNT:
+        raise ValueError(f"count must be an integer between 1 and {MAX_RECOMMEND_COUNT}")
+    if not 0.0 <= require_ok_rate <= 1.0:
+        raise ValueError("require_ok_rate must be between 0.0 and 1.0")
+    picked: list[Ranked] = []
+    for item in ranked:
+        item_base = base if base is not None else (item.base or DEFAULT_BASE)
+        if item.server == item_base:
+            continue
+        if _ok_rate(item.ok, item.fail) >= require_ok_rate:
+            picked.append(item)
+            if len(picked) == count:
+                break
+    return picked
+
+
 def format_ranked_table(ranked: list[Ranked], *, top_n: int | None = 5) -> str:
     """Return a readable text table for ranking results."""
     if top_n is not None and top_n < 1:
@@ -439,13 +490,14 @@ def format_ranked_table(ranked: list[Ranked], *, top_n: int | None = 5) -> str:
     name_w = max(22, *(len(item.server) for item in rows))
     header = (
         f"{'rank':<4} {'server':<{name_w}} {'score':>8} {'grade':>5} "
-        f"{'vs_base(ms)':>12} {'delay(ms)':>10} {'ok/fail':>8}"
+        f"{'vs_base(ms)':>12} {'±(ms)':>8} {'delay(ms)':>10} {'ok/fail':>8}"
     )
     lines = [header, "-" * len(header)]
     for index, item in enumerate(rows, start=1):
         ok_fail = f"{item.ok}/{item.fail}"
+        unc = f"{item.uncertainty_ms:.2f}" if item.uncertainty_ms is not None else "-"
         lines.append(
             f"{index:<4} {item.server:<{name_w}} {item.score:>8.2f} {item.grade:>5} "
-            f"{item.vs_base_ms:>12.2f} {item.avg_delay_ms:>10.2f} {ok_fail:>8}"
+            f"{item.vs_base_ms:>12.2f} {unc:>8} {item.avg_delay_ms:>10.2f} {ok_fail:>8}"
         )
     return "\n".join(lines)
