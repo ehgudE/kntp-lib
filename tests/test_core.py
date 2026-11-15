@@ -97,7 +97,11 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             collect_stats(["a"] * 65, samples=1)
         with self.assertRaises(ValueError):
-            collect_stats(["a"] * 11, samples=10)
+            collect_stats(["a"] * 25, samples=10)
+        with self.assertRaises(ValueError):
+            collect_stats(["a"] * 12, samples=21)
+        with self.assertRaises(ValueError):
+            rank_servers([Stats("base", 1, 0, 0, 0, 1, 0)], base="base", offset_method="median")
         with self.assertRaises(ValueError):
             collect_stats(["a"], samples=51)
         with self.assertRaises(ValueError):
@@ -114,6 +118,46 @@ class CoreTests(unittest.TestCase):
         stats = collect_stats(["s1"], samples=2, sleep_between=0)
         self.assertEqual(stats[0].ok, 1)
         self.assertEqual(stats[0].fail, 1)
+
+    def test_default_servers_allow_twenty_samples(self):
+        from kntp.core import DEFAULT_SERVERS
+
+        with patch("kntp.core.query_ntp", return_value=Sample(0, 1)) as mock_query:
+            stats = collect_stats(DEFAULT_SERVERS, samples=20, sleep_between=0)
+        self.assertEqual(mock_query.call_count, len(DEFAULT_SERVERS) * 20)
+        self.assertEqual(len(stats), len(DEFAULT_SERVERS))
+
+    def test_probe_limit_error_suggests_max_samples(self):
+        with self.assertRaisesRegex(ValueError, r"samples <= 20 for 12 servers"):
+            collect_stats(["a"] * 12, samples=21)
+
+    @patch(
+        "kntp.core.query_ntp",
+        side_effect=[Sample(10.0, 50.0), Sample(1.0, 5.0), Sample(4.0, 20.0)],
+    )
+    def test_collect_stats_records_min_delay_offset(self, _mock_query):
+        stats = collect_stats(["s1"], samples=3, sleep_between=0)
+        self.assertEqual(stats[0].avg_offset_ms, 5.0)
+        self.assertEqual(stats[0].min_delay_offset_ms, 1.0)
+
+    def test_rank_servers_min_delay_offset_method(self):
+        stats = [
+            Stats("base", 5, 0, 0.0, 0.0, 10, 0, min_delay_offset_ms=0.0),
+            # 평균은 혼잡 샘플 때문에 크게 벗어나지만, 최소 delay 샘플은 기준과 거의 일치
+            Stats("noisy", 5, 0, 8.0, 0.0, 10, 0, min_delay_offset_ms=0.5),
+        ]
+        by_mean = rank_servers(stats, base="base", w_delay=0, w_jitter=0)
+        by_min = rank_servers(stats, base="base", w_delay=0, w_jitter=0, offset_method="min_delay")
+        noisy_mean = next(item for item in by_mean if item.server == "noisy")
+        noisy_min = next(item for item in by_min if item.server == "noisy")
+        self.assertEqual(noisy_mean.vs_base_ms, 8.0)
+        self.assertEqual(noisy_min.vs_base_ms, 0.5)
+
+    def test_rank_servers_min_delay_falls_back_to_mean(self):
+        stats = [Stats("base", 5, 0, 1.0, 0, 10, 0), Stats("other", 5, 0, 3.0, 0, 10, 0)]
+        ranked = rank_servers(stats, base="base", offset_method="min_delay")
+        other = next(item for item in ranked if item.server == "other")
+        self.assertEqual(other.vs_base_ms, 2.0)
 
     @patch("kntp.core.query_ntp", side_effect=RuntimeError("unexpected"))
     def test_collect_stats_does_not_swallow_unexpected_errors(self, _mock_query):

@@ -17,7 +17,9 @@ MAX_SERVERS = 64
 MAX_SAMPLES = 50
 MAX_TIMEOUT = 10.0
 MAX_SLEEP_BETWEEN = 5.0
-MAX_TOTAL_PROBES = 100
+MAX_TOTAL_PROBES = 240  # DEFAULT_SERVERS(12) x 20 samples
+
+OFFSET_METHODS = ("mean", "min_delay")
 
 DEFAULT_BASE = "ntp.kriss.re.kr"
 
@@ -60,6 +62,8 @@ class Stats:
     std_offset_ms: float
     avg_delay_ms: float
     std_delay_ms: float
+    min_delay_offset_ms: float | None = None
+    """delay가 가장 작았던 샘플의 offset. 경로 지연·비대칭 영향이 가장 적은 값."""
 
 
 @dataclass(frozen=True)
@@ -209,7 +213,12 @@ def collect_stats(
     if not 1 <= samples <= MAX_SAMPLES:
         raise ValueError(f"samples must be between 1 and {MAX_SAMPLES}")
     if len(servers) * samples > MAX_TOTAL_PROBES:
-        raise ValueError(f"servers * samples must be <= {MAX_TOTAL_PROBES}")
+        max_for_count = MAX_TOTAL_PROBES // len(servers)
+        raise ValueError(
+            f"servers * samples must be <= {MAX_TOTAL_PROBES} "
+            f"(got {len(servers)} * {samples}; use samples <= {max_for_count} "
+            f"for {len(servers)} servers)"
+        )
     if not 0 < timeout <= MAX_TIMEOUT:
         raise ValueError(f"timeout must be > 0 and <= {MAX_TIMEOUT}")
     if not 0 <= sleep_between <= MAX_SLEEP_BETWEEN:
@@ -236,6 +245,7 @@ def collect_stats(
 
         offsets = [sample.offset_ms for sample in raw[server]]
         delays = [sample.delay_ms for sample in raw[server]]
+        best_sample = min(raw[server], key=lambda sample: sample.delay_ms)
         out.append(
             Stats(
                 server=server,
@@ -245,6 +255,7 @@ def collect_stats(
                 std_offset_ms=pstdev(offsets) if ok > 1 else 0.0,
                 avg_delay_ms=mean(delays),
                 std_delay_ms=pstdev(delays) if ok > 1 else 0.0,
+                min_delay_offset_ms=best_sample.offset_ms,
             )
         )
     return out
@@ -258,8 +269,17 @@ def rank_servers(
     w_jitter: float = 0.50,
     max_delay_ms: float | None = 100.0,
     allow_base: bool = True,
+    offset_method: str = "mean",
 ) -> list[Ranked]:
-    """기준(base) 대비 점수화해 정렬한 리스트 반환."""
+    """기준(base) 대비 점수화해 정렬한 리스트 반환.
+
+    offset_method:
+        "mean"      - 모든 성공 샘플의 평균 offset으로 기준과 비교(기본값).
+        "min_delay" - delay가 가장 작은 샘플의 offset으로 비교. 혼잡·경로 비대칭으로
+                      튄 샘플의 영향을 줄이며, 일반적인 NTP 클라이언트의 방식에 가깝다.
+    """
+    if offset_method not in OFFSET_METHODS:
+        raise ValueError(f"offset_method must be one of {OFFSET_METHODS}")
     if w_delay < 0 or w_jitter < 0:
         raise ValueError("w_delay and w_jitter must be >= 0")
     if max_delay_ms is not None and max_delay_ms <= 0:
@@ -269,11 +289,17 @@ def rank_servers(
     if base_stat is None:
         raise RuntimeError(f"Base server '{base}' stats not found (측정 실패/목록 누락).")
 
+    def offset_of(item: Stats) -> float:
+        if offset_method == "min_delay" and item.min_delay_offset_ms is not None:
+            return item.min_delay_offset_ms
+        return item.avg_offset_ms
+
+    base_offset = offset_of(base_stat)
     ranked: list[Ranked] = []
     for item in stats:
         if not allow_base and item.server == base:
             continue
-        vs_base = item.avg_offset_ms - base_stat.avg_offset_ms
+        vs_base = offset_of(item) - base_offset
         score = abs(vs_base) + (w_delay * item.avg_delay_ms) + (w_jitter * item.std_offset_ms)
         if max_delay_ms is not None and item.avg_delay_ms >= max_delay_ms:
             continue
