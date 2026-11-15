@@ -4,7 +4,7 @@
 
 # kntp-lib
 
-KRISS(한국표준과학연구원)를 기준으로 NTP 서버의 정확도, 지연 및 안정성을 분석하고 적합한 서버를 추천하는 Python 라이브러리입니다.
+KRISS(한국표준과학연구원)를 기준으로 보조NTP 서버의 정확도, 지연 및 안정성을 분석하고 적합한 서버를 추천하는 Python 라이브러리입니다.
 
 ## 주요 기능
 
@@ -128,9 +128,17 @@ python -m twine check dist/*
 
 이전 소스 버전은 `Versions/<버전>`에 보존합니다. 보존 버전은 기록용이며 최신 보안 수정이 포함되지 않을 수 있습니다. 최신 패키지 소스는 저장소 기본 위치에 있습니다.
 
-## 배포 보안
+## 배포
 
-PyPI 배포를 자동화할 경우 장기 API 토큰을 저장하지 말고 PyPI Trusted Publishing(OIDC)을 사용하세요. 빌드·테스트 작업과 배포 작업은 서로 다른 job으로 분리하고, 배포 job에만 `id-token: write` 권한을 부여해야 합니다.
+GitHub에서 릴리스를 발행(Publish)하면 `.github/workflows/publish.yml`이 테스트·빌드 후 PyPI에 자동 배포합니다.
+
+1. `pyproject.toml`의 `version`과 `src/kntp/__init__.py`의 `__version__`을 새 버전으로 올려 `main`에 반영합니다.
+2. GitHub의 **Releases → Draft a new release**에서 같은 버전의 태그(예: `v1.1.0`)를 만들고 **Publish release**를 누릅니다.
+3. 태그와 패키지 버전이 다르면 배포 전에 실패합니다.
+
+### 배포 보안
+
+PyPI 배포는 장기 API 토큰 없이 PyPI Trusted Publishing(OIDC)을 사용합니다. 빌드·테스트 job과 배포 job을 분리하고, 배포 job에만 `id-token: write` 권한을 부여합니다. 배포 job은 GitHub `pypi` 환경에서 실행되므로, 저장소 **Settings → Environments → pypi**에서 승인자(Required reviewers)를 지정하면 배포 전에 수동 승인을 받게 할 수 있습니다.
 
 ## 라이선스
 
