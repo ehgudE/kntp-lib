@@ -6,23 +6,28 @@
 
 KRISS(한국표준과학연구원)를 기준으로 보조NTP 서버의 정확도, 지연 및 안정성을 분석하고 적합한 서버를 추천하는 Python 라이브러리입니다.
 
+KRISS(`ntp.kriss.re.kr`)를 기준 시각으로 삼아, 함께 쓸 **보조 NTP 서버**를 골라 줍니다. NTP 클라이언트는 서버가 여러 개 있어야 틀린 서버를 걸러낼 수 있습니다. 그래서 KRISS 하나만 쓰기보다 믿을 만한 보조 서버를 함께 설정하는 것이 좋습니다.
+
+## 이럴 때 쓰세요
+
+- 서버나 사내망의 chrony·ntpd·Windows 시간 설정에 KRISS와 함께 넣을 보조 서버를 고를 때
+- 내 네트워크에서 시각이 크게 틀리거나 응답이 불안정한 NTP 서버를 걸러낼 때
+- UDP 123 포트가 막혔는지, 어떤 NTP 서버가 응답하는지 확인할 때
+
 ## 주요 기능
 
-- NTP 4-timestamp 공식 기반 offset 및 delay 계산
-- IPv4와 IPv6 UDP 연결 지원
-- 응답 출발지 고정과 NTP v3/v4·비동기 stratum·비정상 timestamp 검증
-- 2036년 NTP era rollover 처리
-- 서버별 평균·표준편차, 점수 기반 순위와 A–D 등급
-- 성공률 조건을 적용한 보조 서버 세트 추천(기본 3개)
-- 경로 비대칭으로 생길 수 있는 오차 범위(±) 표시
-- `kntp` 명령으로 측정하고 chrony·Windows(w32tm) 설정을 바로 출력
-- 몇 시간~며칠 동안 재는 장기 측정 모드(`kntp --watch 4h`, `kntp.monitor()`)
-
-## 지원 환경
-
-- Python 3.11–3.15
-- Python 3.10은 2026년 10월 보안 지원 종료로 인해 지원하지 않습니다.
-- CI는 각 지원 Python 버전에서 소스 테스트, sdist·wheel 빌드, 재빌드 wheel 설치 및 메타데이터 검사를 수행합니다.
+- **보조 서버 세트 추천:** 성공률 조건을 만족하는 상위 서버를 기본 3개 추천합니다.
+- **오차 범위(±) 표시:** 경로 비대칭 때문에 생길 수 있는 최대 오차를 함께 보여 줍니다. 결과를 과하게 해석하지 않도록 돕습니다.
+- **설정 바로 출력:** chrony 설정, Windows(`w32tm`) 명령, JSON으로 결과를 출력합니다.
+- **장기 측정 모드:** 몇 시간~며칠 동안 일정한 간격으로 측정합니다(`kntp --watch 4h`).
+- **정확한 측정:**
+  - NTP 4-timestamp 공식으로 offset과 delay를 계산합니다.
+  - IPv4와 IPv6를 지원합니다.
+  - 응답 출발지를 고정하고, NTP 버전·stratum·timestamp를 검증합니다.
+  - 2036년 NTP era rollover를 처리합니다.
+- **공용 서버 예절:**
+  - Kiss-o'-Death(`RATE`/`DENY`/`RSTR`)를 받은 서버에는 더 요청하지 않습니다.
+  - 측정 횟수와 간격에 한도를 둡니다.
 
 ## 설치
 
@@ -30,34 +35,75 @@ KRISS(한국표준과학연구원)를 기준으로 보조NTP 서버의 정확도
 pip install kntp-lib
 ```
 
-## 명령줄에서 사용하기
+Python 3.11–3.15를 지원합니다. 설치하면 `kntp` 명령을 쓸 수 있습니다. `python -m kntp`로 실행해도 같습니다.
 
-설치하면 `kntp` 명령을 쓸 수 있습니다(`python -m kntp`도 같습니다).
-
-```bash
-kntp                      # 기본 서버 12개를 측정하고 보조 서버 3개 추천
-kntp -n 10 -c 4           # 서버당 10회 측정, 보조 서버 4개 추천
-kntp time.bora.net kr.pool.ntp.org   # 원하는 서버만 측정 (기준 서버는 자동 포함)
-kntp -f chrony            # chrony.conf에 넣을 설정 출력
-kntp -f w32tm             # Windows 시간 서비스 설정 명령 출력
-kntp -f json              # 다른 프로그램에서 쓰기 좋은 JSON 출력
-```
-
-### 장기 측정 모드
-
-한 번의 짧은 측정은 그 순간의 네트워크 상태에 크게 좌우됩니다. 설정에 넣을 서버를 고를 때는 몇 시간 이상 재 보는 것이 좋습니다.
+## 빠른 시작
 
 ```bash
-kntp --watch 4h                   # 4시간 동안 64초마다 측정
-kntp --watch 1d -f chrony         # 하루 동안 잰 결과로 chrony 설정 출력
-kntp --watch 30m --interval 30    # 30분 동안 30초마다 측정
+kntp
 ```
 
-- 진행 상황은 회차마다 표시됩니다(`[3/225] 응답한 서버 9개, 남은 시간 약 3시간 57분`).
+기본 서버 12개를 서버당 7회씩 측정합니다. 그 결과로 KRISS와 함께 쓸 보조 서버 3개를 추천하며, 몇 초면 끝납니다.
+
+```text
+rank server                    score grade  vs_base(ms)    ±(ms)  delay(ms)  ok/fail
+------------------------------------------------------------------------------------
+1    time.bora.net              2.28     A         0.19    11.19      10.23      7/0
+2    clock.iptime.co.kr         2.86     A         0.87    10.86       9.58      7/0
+3    kr.pool.ntp.org            3.12     A         1.11    10.98       9.82      7/0
+...
+9    time.google.com           21.01     D         6.34    40.39      68.64      7/0
+
+추천 보조 서버 (기준 ntp.kriss.re.kr와 함께 사용):
+  1. time.bora.net  [A] vs_base +0.19 ms ± 11.19 ms, delay 10.23 ms
+  2. clock.iptime.co.kr  [A] vs_base +0.87 ms ± 10.86 ms, delay 9.58 ms
+  3. kr.pool.ntp.org  [A] vs_base +1.11 ms ± 10.98 ms, delay 9.82 ms
+```
+
+설정에 넣을 서버를 고를 때는 오래 측정하는 것을 권장합니다. 짧은 측정 한 번은 그 순간의 네트워크 상태에 크게 좌우되기 때문입니다.
+
+```bash
+kntp --watch 4h -f chrony
+```
+
+결과를 읽는 방법은 [결과 읽는 법](#결과-읽는-법)을 참고하세요.
+
+## 명령줄 사용법
+
+### 짧은 측정
+
+```bash
+kntp                                   # 기본 서버 12개, 서버당 7회
+kntp -n 10 -c 4                        # 서버당 10회 측정, 보조 서버 4개 추천
+kntp time.bora.net kr.pool.ntp.org     # 원하는 서버만 측정 (기준 서버는 자동 포함)
+```
+
+### 장기 측정
+
+```bash
+kntp --watch 4h                        # 4시간 동안 64초마다 측정
+kntp --watch 1d -f chrony              # 하루 동안 잰 결과로 chrony 설정 출력
+kntp --watch 30m --interval 30         # 30분 동안 30초마다 측정
+```
+
+- 기간은 `90s`, `30m`, `4h`, `1d`, `1.5h`처럼 씁니다. 단위를 생략하면 초입니다.
+- 회차마다 진행 상황과 남은 시간이 표시됩니다(`[3/225] 응답한 서버 11개, 남은 시간 약 3시간 57분`).
 - **Ctrl+C**로 중간에 멈추면 그때까지 끝난 회차의 결과로 추천합니다.
-- 측정 간격은 16–3600초이고 기본값은 64초입니다. NTP 클라이언트의 기본 최소 간격과 같은 값으로, 공용 NTP 서버에 부담을 주지 않기 위한 하한입니다.
-- 오래 재는 동안 이 컴퓨터의 시계가 흘러가면(drift) 모든 서버의 offset이 함께 움직입니다. 그래서 응답한 서버가 3개 이상인 회차에서는 그 회차 offset의 중앙값을 뺀 값으로 jitter(`std_offset_ms`)를 계산합니다. 덕분에 내 시계의 흔들림이 서버의 흔들림으로 잡히지 않습니다. `avg_offset_ms`는 원래 값 그대로입니다.
-- 터미널을 닫으면 측정이 멈춥니다. Linux 서버에서 오래 돌릴 때는 `nohup kntp --watch 1d -f chrony > kntp.conf &`처럼 백그라운드로 실행하세요.
+- 측정 간격은 16–3600초이고 기본값은 64초입니다. 64초는 NTP 클라이언트의 기본 최소 간격입니다. 공용 서버에 부담을 주지 않으려고 이 값을 기본으로 씁니다.
+- 터미널을 닫으면 측정이 멈춥니다. Linux 서버에서 오래 돌릴 때는 백그라운드로 실행하세요.
+
+  ```bash
+  nohup kntp --watch 1d -f chrony > kntp.conf &
+  ```
+
+### 설정 출력
+
+| 옵션 | 출력 |
+|---|---|
+| `-f table` (기본값) | 순위 표와 추천 서버 |
+| `-f chrony` | `chrony.conf`에 넣을 서버 설정 |
+| `-f w32tm` | Windows 시간 서비스 설정 명령 |
+| `-f json` | 다른 프로그램에서 쓰기 좋은 JSON |
 
 `-f chrony` 출력 예시:
 
@@ -68,31 +114,67 @@ server time.bora.net iburst
 pool kr.pool.ntp.org iburst
 ```
 
-- `*.pool.ntp.org`는 여러 서버의 묶음이므로 chrony의 `pool` 지시어로 출력합니다.
+- 기준 서버에는 `prefer`가 붙습니다.
+- `*.pool.ntp.org`는 여러 서버의 묶음이므로 `pool` 지시어로 출력합니다.
 - `-f w32tm`이 출력하는 명령은 관리자 권한 명령 프롬프트에서 실행해야 합니다.
-- kntp는 출력만 하고 시스템 설정을 직접 바꾸지 않습니다.
-- 종료 코드는 다음과 같습니다. `0`: 추천 성공. `1`: 기준 서버 측정 실패이거나 조건을 만족하는 보조 서버가 없음. `2`: 잘못된 인자.
+- kntp는 설정을 출력만 합니다. 시스템 설정이나 시계를 직접 바꾸지 않습니다.
 
-`kntp --help`로 전체 옵션을 볼 수 있습니다.
+### 전체 옵션
 
-## 빠른 시작
+| 옵션 | 기본값 | 설명 |
+|---|---|---|
+| `SERVER ...` | 기본 서버 12개 | 측정할 서버. 기준 서버는 자동으로 포함됩니다. |
+| `--base` | `ntp.kriss.re.kr` | 기준 서버 |
+| `-n`, `--samples` | 7 | 짧은 측정에서 서버당 측정 횟수 |
+| `--sleep` | 0.3 | 짧은 측정의 회차 사이 대기 시간(초) |
+| `-w`, `--watch` | - | 장기 측정 기간(예: `4h`) |
+| `--interval` | 64 | 장기 측정 간격(초), 16–3600 |
+| `--timeout` | 2.0 | 응답 대기 시간(초) |
+| `-c`, `--count` | 3 | 추천할 보조 서버 수, 1–10 |
+| `--offset-method` | `mean` | `mean` 또는 `min_delay` ([offset 비교 방식](#offset-비교-방식) 참고) |
+| `--max-delay` | 100 | delay가 이 값(ms) 이상인 서버는 제외 |
+| `--require-ok-rate` | 0.8 | 추천에 필요한 최소 성공률 |
+| `-f`, `--format` | `table` | `table`, `chrony`, `w32tm`, `json` |
+
+종료 코드:
+- `0`: 추천 성공
+- `1`: 기준 서버 측정 실패, 또는 조건을 만족하는 보조 서버 없음
+- `2`: 잘못된 인자
+
+## 결과 읽는 법
+
+| 열 | 뜻 |
+|---|---|
+| `vs_base(ms)` | 기준 서버(KRISS)와의 시각 차이. 0에 가까울수록 좋습니다. |
+| `±(ms)` | `vs_base`의 최대 오차. [아래](#오차-범위)를 참고하세요. |
+| `delay(ms)` | 평균 왕복 지연 |
+| `ok/fail` | 성공·실패 횟수 |
+| `score` | `abs(vs_base) + 0.2 × delay + 0.5 × jitter`. 낮을수록 좋습니다. |
+| `grade` | 점수 등급. A(≤5), B(≤10), C(≤20), D(>20) |
+
+### 오차 범위(±)
+
+NTP는 요청이 가는 경로와 응답이 오는 경로의 시간이 같다고 가정합니다. 경로가 비대칭이면 측정한 offset이 최대 `delay / 2`만큼 틀릴 수 있습니다. 기준 서버 측정에도 같은 오차가 있으므로, `±` 값은 `(이 서버의 delay + 기준 서버의 delay) / 2`입니다.
+
+- **`|vs_base|`가 `±`보다 작으면:** 그 서버가 기준과 다른지 측정만으로는 구분할 수 없습니다. 대부분의 정상 서버가 여기에 해당합니다. 그러니 점수가 비슷한 서버끼리의 순위 차이는 크게 믿지 마세요.
+- **`|vs_base|`가 `±`보다 확실히 크면:** 그 서버의 시각이 실제로 어긋나 있을 가능성이 높습니다. kntp는 이렇게 크게 틀린 서버를 걸러내는 데 특히 유용합니다.
+
+### 왜 여러 개를 추천하나요?
+
+chrony, ntpd 같은 NTP 클라이언트는 서버가 3~4개 이상이어야 그중 틀린 서버(falseticker)를 걸러낼 수 있습니다. 그래서 서버 1개 대신 보조 서버 세트를 추천합니다.
+
+- 기준 서버는 추천 목록에 넣지 않습니다.
+- 조건을 만족하는 서버가 모자라면 더 적게 추천합니다.
+
+## Python에서 사용하기
+
+### 짧은 측정
 
 ```python
 import kntp
 
-stats = kntp.collect_stats(
-    kntp.DEFAULT_SERVERS,
-    samples=7,
-    timeout=2.0,
-    sleep_between=0.3,
-)
-ranked = kntp.rank_servers(
-    stats,
-    base=kntp.DEFAULT_BASE,
-    w_delay=0.20,
-    w_jitter=0.50,
-    max_delay_ms=120.0,
-)
+stats = kntp.collect_stats(kntp.DEFAULT_SERVERS, samples=7, timeout=2.0, sleep_between=0.3)
+ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE)
 secondaries = kntp.recommend_set(ranked, count=3, require_ok_rate=0.8)
 
 print(kntp.format_ranked_table(ranked, top_n=5))
@@ -100,7 +182,11 @@ for item in secondaries:
     print(f"{item.server}: vs_base {item.vs_base_ms:+.2f} ms ± {item.uncertainty_ms:.2f} ms")
 ```
 
-장기 측정은 `monitor()`로 할 수 있습니다. 결과는 `collect_stats()`와 같은 `Stats` 목록이라 `rank_servers()`에 그대로 넘기면 됩니다.
+서버 1개만 필요하면 `recommend_set()` 대신 `recommend()`를 쓰세요. 서버 하나 또는 `None`을 돌려줍니다.
+
+### 장기 측정
+
+`monitor()`의 결과는 `collect_stats()`와 같은 `Stats` 목록입니다. 그대로 `rank_servers()`에 넘기면 됩니다.
 
 ```python
 stats = kntp.monitor(
@@ -112,67 +198,9 @@ stats = kntp.monitor(
 ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE)
 ```
 
-### 보조 서버를 여러 개 추천하는 이유
+`on_round(완료한 회차, 전체 회차, 지금까지의 통계)`는 회차마다 호출됩니다. 진행 상황을 표시하거나 중간 결과를 저장할 때 쓰세요.
 
-chrony, ntpd 같은 NTP 클라이언트는 서버가 3~4개 이상이어야 그중 틀린 서버(falseticker)를 걸러낼 수 있습니다. 그래서 `recommend_set()`은 기준 서버를 뺀 상위 서버를 `count`개(기본 3개) 돌려줍니다. 조건을 만족하는 서버가 모자라면 더 적게 돌려줍니다. 서버 1개만 필요하면 `recommend()`를 쓰면 됩니다.
-
-### 오차 범위(±) 읽는 법
-
-NTP는 요청이 가는 경로와 응답이 오는 경로의 시간이 같다고 가정합니다. 경로가 비대칭이면 측정한 offset이 최대 `delay / 2`만큼 틀릴 수 있습니다. 기준 서버 측정에도 같은 오차가 있으므로, 각 결과의 `uncertainty_ms`(표의 `±(ms)` 열)는 `(이 서버의 delay + 기준 서버의 delay) / 2`입니다.
-
-`|vs_base_ms|`가 `uncertainty_ms`보다 작으면 그 서버가 기준과 다른지 측정만으로는 구분할 수 없습니다. 대부분의 정상 서버는 여기에 해당하므로, 점수가 비슷한 서버끼리의 순위 차이를 크게 믿지 마세요. 반대로 `|vs_base_ms|`가 `uncertainty_ms`보다 확실히 크면 그 서버의 시각이 실제로 어긋나 있을 가능성이 높습니다. 이 라이브러리는 이렇게 크게 틀린 서버를 걸러내는 데 특히 유용합니다.
-
-권장 시작값은 `samples=7`, `timeout=2.0`, `sleep_between=0.3`, `require_ok_rate=0.8`입니다.
-
-### offset 비교 방식
-
-`rank_servers()`는 기본적으로 모든 성공 샘플의 평균 offset(`offset_method="mean"`)으로 기준 서버와 비교합니다. `offset_method="min_delay"`를 주면 서버별로 delay가 가장 작았던 샘플의 offset을 사용합니다. 네트워크 혼잡이나 경로 비대칭으로 튄 샘플의 영향을 줄여 주며, 일반적인 NTP 클라이언트의 샘플 선택 방식에 가깝습니다.
-
-```python
-ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE, offset_method="min_delay")
-```
-
-## 예외 처리
-
-```python
-import kntp
-
-try:
-    stats = kntp.collect_stats(kntp.DEFAULT_SERVERS, samples=7, timeout=2.0)
-    ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE)
-    best = kntp.recommend(ranked, require_ok_rate=0.8)
-except ValueError as exc:
-    print("입력값 오류:", exc)
-except RuntimeError as exc:
-    print("기준 서버 측정 실패:", exc)
-else:
-    print("추천 서버:", best.server if best else "없음")
-```
-
-개별 서버의 DNS 실패, 타임아웃, 잘못된 NTP 응답, 형식이 잘못된 호스트 이름은 그 서버의 실패 횟수로 집계되며 다른 서버의 측정은 계속됩니다. 기준 서버 측정이 모두 실패하거나 성공률이 `min_base_ok_rate`(기본 50%)보다 낮으면 `rank_servers()`가 `RuntimeError`를 발생시킵니다.
-
-### 측정·점수 규칙
-
-- 서버 목록의 중복은 한 번만 측정합니다. 목록 대신 문자열 하나를 넘기면 `ValueError`입니다.
-- 서버가 Kiss-o'-Death(`RATE`, `DENY`, `RSTR`)로 응답하면 그 서버에는 더 요청하지 않고, 남은 회차는 실패로 집계합니다. 공용 NTP 서버의 요청 제한을 존중하기 위한 동작입니다.
-- delay는 시스템 시각 조정의 영향을 받지 않는 단조 시계(`time.perf_counter`)로 잽니다.
-- 성공 샘플이 1개뿐인 서버는 흔들림(jitter)을 알 수 없으므로, 점수 계산에서 jitter 대신 NTP 오차 상한인 `delay / 2`를 씁니다.
-- `recommend()`와 `recommend_set()`은 기준 서버를 추천하지 않습니다. `base`를 생략하면 `rank_servers()`에 넘긴 기준 서버를 자동으로 사용합니다.
-
-## API 제약사항
-
-- 서버 수: 1–64개 (중복 제거 후)
-- `samples`: 1–50
-- 서버 수 × `samples`: 최대 240회 (기본 서버 12개 기준 `samples` 최대 20)
-- `timeout`: 0초 초과, 10초 이하
-- `sleep_between`: 0–5초
-- `rank_servers(): w_delay >= 0, w_jitter >= 0, max_delay_ms > 0 또는 None, offset_method는 "mean" 또는 "min_delay", 0.0 <= min_base_ok_rate <= 1.0`
-- `recommend(): 0.0 <= require_ok_rate <= 1.0`
-- `recommend_set(): 1 <= count <= 10, 0.0 <= require_ok_rate <= 1.0`
-- `monitor(): 1 <= rounds <= 20160, 16 <= interval <= 3600(초)`. 서버 수와 `timeout` 제한은 `collect_stats()`와 같고, 서버 수 × 횟수 제한(240회)은 적용하지 않습니다.
-- `format_ranked_table(): top_n >= 1 또는 None`
-
-## 사용자 서버 목록
+### 사용자 서버 목록
 
 ```python
 servers = ["ntp.kriss.re.kr", "kr.pool.ntp.org", "time.bora.net"]
@@ -180,16 +208,100 @@ stats = kntp.collect_stats(servers, samples=7)
 ranked = kntp.rank_servers(stats, base="ntp.kriss.re.kr")
 ```
 
+### offset 비교 방식
+
+`rank_servers()`는 기본적으로 성공한 모든 샘플의 평균 offset(`offset_method="mean"`)으로 기준 서버와 비교합니다.
+
+`offset_method="min_delay"`를 주면, 서버별로 delay가 가장 작았던 샘플의 offset을 씁니다. 혼잡이나 경로 비대칭 때문에 튄 샘플의 영향을 줄여 주며, 일반적인 NTP 클라이언트가 샘플을 고르는 방식에 가깝습니다.
+
+```python
+ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE, offset_method="min_delay")
+```
+
+### 예외 처리
+
+```python
+import kntp
+
+try:
+    stats = kntp.collect_stats(kntp.DEFAULT_SERVERS, samples=7, timeout=2.0)
+    ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE)
+    secondaries = kntp.recommend_set(ranked)
+except ValueError as exc:
+    print("입력값 오류:", exc)
+except RuntimeError as exc:
+    print("기준 서버 측정 실패:", exc)
+else:
+    print("추천 보조 서버:", [item.server for item in secondaries] or "없음")
+```
+
+- 서버 하나에서 생긴 문제는 그 서버의 실패 횟수로만 집계되고, 다른 서버는 계속 측정합니다. DNS 실패, 타임아웃, 잘못된 NTP 응답, 형식이 잘못된 호스트 이름이 여기에 해당합니다.
+- 기준 서버 측정이 모두 실패하거나 성공률이 `min_base_ok_rate`(기본 50%)보다 낮으면, `rank_servers()`가 `RuntimeError`를 발생시킵니다.
+
+### API 요약
+
+| 함수 | 설명 |
+|---|---|
+| `query_ntp(host, timeout)` | 서버 하나를 한 번 측정해 `Sample(offset_ms, delay_ms)` 반환 |
+| `collect_stats(servers, samples, timeout, sleep_between)` | 짧은 측정. 서버별 `Stats` 목록 반환 |
+| `monitor(servers, rounds, interval, timeout, on_round)` | 장기 측정. 서버별 `Stats` 목록 반환 |
+| `rank_servers(stats, base, ...)` | 기준 서버와 비교해 점수 순으로 정렬한 `Ranked` 목록 반환 |
+| `recommend_set(ranked, count, require_ok_rate)` | 추천 보조 서버 목록(기본 3개) |
+| `recommend(ranked, require_ok_rate)` | 추천 서버 1개 또는 `None` |
+| `format_ranked_table(ranked, top_n)` | 결과를 텍스트 표로 변환 |
+
+입력값 제한:
+- **서버 수:** 1–64개(중복 제거 후)
+- **`timeout`:** 0초 초과, 10초 이하
+- **`collect_stats()`:**
+  - `samples`: 1–50
+  - 서버 수 × `samples`: 최대 240회. 기본 서버 12개라면 `samples`는 최대 20입니다.
+  - `sleep_between`: 0–5초
+- **`monitor()`:**
+  - `rounds`: 1–20160
+  - `interval`: 16–3600초
+  - 서버 수 × 횟수 제한(240회)은 적용하지 않습니다.
+- **`rank_servers()`:**
+  - `w_delay`, `w_jitter`: 0 이상
+  - `max_delay_ms`: 0보다 크거나 `None`
+  - `offset_method`: `"mean"` 또는 `"min_delay"`
+  - `min_base_ok_rate`: 0.0–1.0
+- **`recommend()`, `recommend_set()`:** `require_ok_rate`는 0.0–1.0, `recommend_set()`의 `count`는 1–10
+- **`format_ranked_table()`:** `top_n`은 1 이상이거나 `None`
+
+## 측정 방식
+
+- **점수:** `score = |vs_base| + w_delay × delay + w_jitter × jitter`. 기본값은 `w_delay=0.2`, `w_jitter=0.5`이고, jitter는 offset의 표준편차입니다.
+- **성공 샘플이 1개뿐일 때:** jitter를 알 수 없으므로 대신 NTP 오차 상한인 `delay / 2`를 씁니다. 샘플이 적은 서버가 유리해지지 않게 하기 위해서입니다.
+- **장기 측정의 jitter:** 오래 재는 동안 이 컴퓨터의 시계가 흘러가면(drift) 모든 서버의 offset이 함께 움직입니다. 그래서 응답한 서버가 3개 이상인 회차는 그 회차 offset의 중앙값을 뺀 값으로 jitter를 계산합니다. 이렇게 하면 내 시계의 흔들림이 서버의 흔들림으로 잡히지 않습니다. `avg_offset_ms`는 원래 값 그대로입니다.
+- **delay 측정:** 시스템 시각 조정의 영향을 받지 않는 단조 시계(`time.perf_counter`)로 잽니다.
+- **중복 서버:** 서버 목록에 같은 서버가 여러 번 있으면 한 번만 측정합니다.
+- **Kiss-o'-Death:** 서버가 `RATE`, `DENY`, `RSTR`로 응답하면 그 서버에는 더 요청하지 않고, 남은 회차는 실패로 집계합니다.
+- **기준 서버 제외:** `recommend()`와 `recommend_set()`은 기준 서버를 추천하지 않습니다.
+
 ## 네트워크 및 보안
 
-- NTP는 UDP 123 포트를 사용하므로 방화벽에서 차단될 수 있습니다.
-- 연결된 UDP 소켓과 originate timestamp 검증으로 다른 출발지 및 요청과 무관한 응답을 거부합니다.
-- 일반 NTP에는 암호학적 서버 인증이 없습니다. 공격자에 대한 인증이 필요한 환경에서는 NTS(Network Time Security)를 사용해야 합니다.
-- 측정 결과를 인증서, 토큰 만료, 금융 거래, 감사 로그처럼 보안상 중요한 시각 판단에 사용하지 마세요.
-- 이 라이브러리는 시스템 시계를 변경하지 않고 측정·비교만 수행합니다.
-- 외부 사용자가 서버 목록이나 측정 횟수를 지정하는 서비스에서는 애플리케이션 계층의 추가 요청 제한도 적용하세요.
+- NTP는 UDP 123 포트를 사용하므로 방화벽에서 막힐 수 있습니다.
+- 연결된 UDP 소켓을 쓰고 originate timestamp를 검증합니다. 다른 출발지에서 온 응답이나 요청과 무관한 응답은 거부합니다.
+- 일반 NTP에는 암호학적 서버 인증이 없습니다. 공격자를 막는 인증이 필요하다면 NTS(Network Time Security)를 사용하세요.
+- 측정 결과를 보안상 중요한 시각 판단에 쓰지 마세요. 인증서, 토큰 만료, 금융 거래, 감사 로그가 그런 예입니다.
+- 이 라이브러리는 측정과 비교만 하고, 시스템 시계를 바꾸지 않습니다.
+- CLI가 출력한 서버 이름은 설정 파일이나 명령에 그대로 들어갑니다. 그래서 호스트 이름과 IP 주소에 쓰는 문자만 허용하며, 한글 도메인은 punycode(`xn--...`)로 입력해야 합니다.
+- 외부 사용자가 서버 목록이나 측정 횟수를 지정하는 서비스라면, 애플리케이션 단에서도 요청 제한을 두세요.
 
-## 테스트
+## 지원 환경
+
+- Python 3.11–3.15
+- Python 3.10은 2026년 10월에 보안 지원이 끝나 지원하지 않습니다.
+- CI는 지원하는 Python 버전마다 다음을 검사합니다.
+  - 소스 테스트
+  - sdist·wheel 빌드
+  - 재빌드한 wheel 설치
+  - 메타데이터와 `kntp` 명령
+
+## 개발
+
+### 테스트
 
 ```bash
 PYTHONPATH=src python -m unittest discover -s tests -v
@@ -197,21 +309,22 @@ python -m build
 python -m twine check dist/*
 ```
 
-## 버전 보존
+### 배포
 
-이전 소스 버전은 `Versions/<버전>`에 보존합니다. 보존 버전은 기록용이며 최신 보안 수정이 포함되지 않을 수 있습니다. 최신 패키지 소스는 저장소 기본 위치에 있습니다.
-
-## 배포
-
-GitHub에서 릴리스를 발행(Publish)하면 `.github/workflows/publish.yml`이 테스트·빌드 후 PyPI에 자동 배포합니다.
+GitHub에서 릴리스를 발행(Publish)하면 `.github/workflows/publish.yml`이 테스트와 빌드를 거쳐 PyPI에 자동으로 배포합니다.
 
 1. `pyproject.toml`의 `version`과 `src/kntp/__init__.py`의 `__version__`을 새 버전으로 올려 `main`에 반영합니다.
 2. GitHub의 **Releases → Draft a new release**에서 같은 버전의 태그(예: `v1.3.0`)를 만들고 **Publish release**를 누릅니다.
 3. 태그와 패키지 버전이 다르면 배포 전에 실패합니다.
 
-### 배포 보안
+PyPI 배포에는 장기 API 토큰 대신 PyPI Trusted Publishing(OIDC)을 씁니다.
 
-PyPI 배포는 장기 API 토큰 없이 PyPI Trusted Publishing(OIDC)을 사용합니다. 빌드·테스트 job과 배포 job을 분리하고, 배포 job에만 `id-token: write` 권한을 부여합니다. 배포 job은 GitHub `pypi` 환경에서 실행되므로, 저장소 **Settings → Environments → pypi**에서 승인자(Required reviewers)를 지정하면 배포 전에 수동 승인을 받게 할 수 있습니다.
+- 빌드·테스트 job과 배포 job을 나누고, 배포 job에만 `id-token: write` 권한을 줍니다.
+- 배포 job은 GitHub `pypi` 환경에서 실행됩니다. 저장소 **Settings → Environments → pypi**에서 승인자(Required reviewers)를 지정하면, 배포 전에 수동 승인을 거치게 할 수 있습니다.
+
+### 버전 보존
+
+이전 버전의 소스는 `Versions/<버전>`에 보관합니다. 보관본은 기록용이라 최신 보안 수정이 빠져 있을 수 있습니다. 최신 패키지 소스는 저장소 기본 위치에 있습니다.
 
 ## 라이선스
 
