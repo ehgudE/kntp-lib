@@ -86,5 +86,70 @@ class CliTests(unittest.TestCase):
         self.assertIn("보조 서버가 없습니다", out)
 
 
+
+def run_watch(*argv, monitor_impl):
+    out, err = io.StringIO(), io.StringIO()
+    with patch("kntp.cli.monitor", side_effect=monitor_impl) as mon,             patch("kntp.cli.collect_stats") as collect,             redirect_stdout(out), redirect_stderr(err):
+        try:
+            code = cli.main(list(argv))
+        except SystemExit as exc:
+            code = exc.code
+    return code, out.getvalue(), err.getvalue(), mon, collect
+
+
+class WatchCliTests(unittest.TestCase):
+    def test_watch_computes_rounds_from_duration(self):
+        def impl(servers, *, rounds, interval, timeout, on_round):
+            on_round(1, rounds, FAKE)
+            return FAKE
+
+        code, out, err, mon, collect = run_watch("--watch", "1h", monitor_impl=impl)
+        self.assertEqual(code, 0)
+        collect.assert_not_called()
+        self.assertEqual(mon.call_args.kwargs["rounds"], 57)  # ceil(3600 / 64)
+        self.assertEqual(mon.call_args.kwargs["interval"], 64.0)
+        self.assertIn("장기 측정 시작", err)
+        self.assertIn("[1/57]", err)
+        self.assertIn("1. time.bora.net", out)
+
+    def test_watch_custom_interval_and_json(self):
+        code, out, _, mon, _ = run_watch(
+            "-w", "10m", "--interval", "30", "-f", "json",
+            monitor_impl=lambda servers, **kw: FAKE,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(mon.call_args.kwargs["rounds"], 20)
+        data = json.loads(out)
+        self.assertEqual((data["mode"], data["rounds"]), ("watch", 20))
+
+    def test_ctrl_c_uses_last_completed_round(self):
+        def impl(servers, *, rounds, interval, timeout, on_round):
+            on_round(1, rounds, FAKE)
+            on_round(2, rounds, FAKE)
+            raise KeyboardInterrupt
+
+        code, out, err, _, _ = run_watch("-w", "1h", "-f", "json", monitor_impl=impl)
+        self.assertEqual(code, 0)
+        self.assertIn("2회차까지", err)
+        self.assertEqual(json.loads(out)["rounds"], 2)
+
+    def test_ctrl_c_before_first_round_fails(self):
+        def impl(servers, **kw):
+            raise KeyboardInterrupt
+
+        code, _, err, _, _ = run_watch("-w", "1h", monitor_impl=impl)
+        self.assertEqual(code, 1)
+        self.assertIn("완료된 회차 없음", err)
+
+    def test_invalid_watch_and_interval(self):
+        code, *_ , mon, _ = run_watch("-w", "soon", monitor_impl=lambda *a, **k: FAKE)
+        self.assertEqual(code, 2)
+        mon.assert_not_called()
+        # 간격 하한(16초)은 monitor()가 검사하고 ValueError -> 종료 코드 2
+        code, *_ = run_watch("-w", "1h", "--interval", "5",
+                             monitor_impl=__import__("kntp.core", fromlist=["monitor"]).monitor)
+        self.assertEqual(code, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

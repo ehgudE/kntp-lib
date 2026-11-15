@@ -7,7 +7,8 @@ import socket
 import struct
 import time
 from dataclasses import dataclass
-from statistics import mean, pstdev
+from collections.abc import Callable
+from statistics import mean, median, pstdev
 
 NTP_PORT = 123
 NTP_DELTA = 2208988800
@@ -19,6 +20,13 @@ MAX_TIMEOUT = 10.0
 MAX_SLEEP_BETWEEN = 5.0
 MAX_TOTAL_PROBES = 240  # DEFAULT_SERVERS(12) x 20 samples
 MAX_RECOMMEND_COUNT = 10
+
+# 장기 측정(monitor) 제한. 공용 NTP 서버에 부담을 주지 않도록 간격의 하한을 둔다.
+MIN_MONITOR_INTERVAL = 16.0  # chrony minpoll 4와 같은 값
+MAX_MONITOR_INTERVAL = 3600.0
+DEFAULT_MONITOR_INTERVAL = 64.0  # NTP 클라이언트의 기본 최소 폴링 간격
+MAX_MONITOR_ROUNDS = 20160  # 16초 간격으로 약 3.7일, 64초 간격으로 약 2주
+MIN_DETREND_SERVERS = 3
 
 OFFSET_METHODS = ("mean", "min_delay")
 
@@ -285,40 +293,69 @@ def collect_stats(
     stopped: set[str] = set()
 
     for i in range(samples):
-        for server in servers:
-            if server in stopped:
-                fails[server] += 1
-                continue
-            try:
-                raw[server].append(query_ntp(server, timeout=timeout))
-            except NTPKissOfDeathError as exc:
-                fails[server] += 1
-                if exc.code in STOP_KISS_CODES:
-                    stopped.add(server)
-            except (OSError, struct.error, NTPResponseError, UnicodeError):
-                # OSError는 socket.timeout / socket.gaierror를 포함한다.
-                # UnicodeError는 IDNA로 인코딩할 수 없는 호스트 이름(예: 64자 넘는 label)에서 난다.
-                fails[server] += 1
+        _probe_round(servers, timeout, raw, fails, stopped)
         if i != samples - 1 and sleep_between > 0:
             time.sleep(sleep_between)
 
+    return _build_stats(servers, raw, fails)
+
+
+def _probe_round(
+    servers: list[str],
+    timeout: float,
+    raw: dict[str, list[Sample]],
+    fails: dict[str, int],
+    stopped: set[str],
+) -> dict[str, Sample]:
+    """모든 서버를 한 번씩 측정해 raw/fails/stopped를 갱신하고, 이번 회차의 성공 샘플을 반환."""
+    got: dict[str, Sample] = {}
+    for server in servers:
+        if server in stopped:
+            fails[server] += 1
+            continue
+        try:
+            sample = query_ntp(server, timeout=timeout)
+        except NTPKissOfDeathError as exc:
+            fails[server] += 1
+            if exc.code in STOP_KISS_CODES:
+                stopped.add(server)
+            continue
+        except (OSError, struct.error, NTPResponseError, UnicodeError):
+            # OSError는 socket.timeout / socket.gaierror를 포함한다.
+            # UnicodeError는 IDNA로 인코딩할 수 없는 호스트 이름(예: 64자 넘는 label)에서 난다.
+            fails[server] += 1
+            continue
+        raw[server].append(sample)
+        got[server] = sample
+    return got
+
+
+def _build_stats(
+    servers: list[str],
+    raw: dict[str, list[Sample]],
+    fails: dict[str, int],
+    jitter_offsets: dict[str, list[float]] | None = None,
+) -> list[Stats]:
     out: list[Stats] = []
     for server in servers:
         ok = len(raw[server])
-        fail = fails[server]
         if ok == 0:
             continue
-
         offsets = [sample.offset_ms for sample in raw[server]]
         delays = [sample.delay_ms for sample in raw[server]]
         best_sample = min(raw[server], key=lambda sample: sample.delay_ms)
+        detrended = jitter_offsets.get(server, []) if jitter_offsets else []
+        if len(detrended) >= 2:
+            std_offset = pstdev(detrended)
+        else:
+            std_offset = pstdev(offsets) if ok > 1 else 0.0
         out.append(
             Stats(
                 server=server,
                 ok=ok,
-                fail=fail,
+                fail=fails[server],
                 avg_offset_ms=mean(offsets),
-                std_offset_ms=pstdev(offsets) if ok > 1 else 0.0,
+                std_offset_ms=std_offset,
                 avg_delay_ms=mean(delays),
                 std_delay_ms=pstdev(delays) if ok > 1 else 0.0,
                 min_delay_offset_ms=best_sample.offset_ms,
@@ -326,6 +363,61 @@ def collect_stats(
             )
         )
     return out
+
+
+def monitor(
+    servers: list[str],
+    *,
+    rounds: int,
+    interval: float = DEFAULT_MONITOR_INTERVAL,
+    timeout: float = 2.0,
+    on_round: Callable[[int, int, list[Stats]], None] | None = None,
+) -> list[Stats]:
+    """긴 시간 동안 interval초마다 모든 서버를 한 번씩, 총 rounds회 측정해 통계를 반환.
+
+    collect_stats()가 짧은 시간에 몰아서 재는 것과 달리, 시간대별 네트워크 상태 변화까지
+    반영해 오래 안정적인 서버를 고를 수 있다. 예: interval=64, rounds=225 → 약 4시간.
+
+    - 각 회차는 시작 시각 기준 interval 간격으로 실행한다(측정에 걸린 시간만큼 밀리지 않음).
+    - 오래 재는 동안 이 컴퓨터의 시계 자체가 흘러가면(drift) 모든 서버의 offset이 함께 움직인다.
+      이 흔들림이 서버의 jitter로 잡히지 않도록, 응답한 서버가 3개 이상인 회차는 그 회차
+      offset의 중앙값을 뺀 값으로 std_offset_ms를 계산한다. avg_offset_ms는 원래 값 그대로다.
+    - on_round(완료한 회차, 전체 회차, 지금까지의 통계)를 회차마다 호출한다. 진행 표시나
+      중간 저장에 쓸 수 있고, 중간에 멈춰도 마지막으로 받은 통계를 그대로 쓸 수 있다.
+    - 중복 제거, 실패 집계, Kiss-o'-Death 처리는 collect_stats()와 같다.
+    """
+    servers = _normalize_servers(servers)
+    if not 1 <= len(servers) <= MAX_SERVERS:
+        raise ValueError(f"servers count must be between 1 and {MAX_SERVERS}")
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or not 1 <= rounds <= MAX_MONITOR_ROUNDS:
+        raise ValueError(f"rounds must be an integer between 1 and {MAX_MONITOR_ROUNDS}")
+    if not MIN_MONITOR_INTERVAL <= interval <= MAX_MONITOR_INTERVAL:
+        raise ValueError(
+            f"interval must be between {MIN_MONITOR_INTERVAL:g} and {MAX_MONITOR_INTERVAL:g} seconds"
+        )
+    if not 0 < timeout <= MAX_TIMEOUT:
+        raise ValueError(f"timeout must be > 0 and <= {MAX_TIMEOUT}")
+
+    raw: dict[str, list[Sample]] = {s: [] for s in servers}
+    fails: dict[str, int] = {s: 0 for s in servers}
+    stopped: set[str] = set()
+    detrended: dict[str, list[float]] = {s: [] for s in servers}
+
+    start = time.monotonic()
+    for index in range(rounds):
+        if index:
+            wait = start + index * interval - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)
+        got = _probe_round(servers, timeout, raw, fails, stopped)
+        if len(got) >= MIN_DETREND_SERVERS:
+            center = median(sample.offset_ms for sample in got.values())
+            for server, sample in got.items():
+                detrended[server].append(sample.offset_ms - center)
+        if on_round is not None:
+            on_round(index + 1, rounds, _build_stats(servers, raw, fails, detrended))
+
+    return _build_stats(servers, raw, fails, detrended)
 
 
 def _ok_rate(ok: int, fail: int) -> float:
