@@ -17,6 +17,7 @@ from kntp.core import (
     grade,
     rank_servers,
     recommend,
+    recommend_set,
 )
 
 
@@ -278,6 +279,67 @@ class CoreTests(unittest.TestCase):
         ]
         lines = format_ranked_table(ranked).splitlines()
         self.assertEqual(len({len(line) for line in lines}), 1)
+
+
+
+def make_stats(server, *, ok=5, fail=0, offset=0.0, delay=10.0, min_delay=None):
+    return Stats(
+        server=server,
+        ok=ok,
+        fail=fail,
+        avg_offset_ms=offset,
+        std_offset_ms=0.0,
+        avg_delay_ms=delay,
+        std_delay_ms=0.0,
+        min_delay_offset_ms=offset,
+        min_delay_ms=delay if min_delay is None else min_delay,
+    )
+
+
+class UncertaintyAndSetTests(unittest.TestCase):
+    def test_uncertainty_is_half_of_both_delays(self):
+        stats = [make_stats("base", delay=4.0), make_stats("a", offset=1.0, delay=10.0)]
+        ranked = {r.server: r for r in rank_servers(stats, base="base")}
+        self.assertAlmostEqual(ranked["a"].uncertainty_ms, 10.0 / 2 + 4.0 / 2)
+        self.assertEqual(ranked["base"].uncertainty_ms, 0.0)
+
+    def test_uncertainty_uses_min_delay_with_min_delay_method(self):
+        stats = [
+            make_stats("base", delay=4.0, min_delay=2.0),
+            make_stats("a", delay=10.0, min_delay=6.0),
+        ]
+        ranked = {r.server: r for r in rank_servers(stats, base="base", offset_method="min_delay")}
+        self.assertAlmostEqual(ranked["a"].uncertainty_ms, 6.0 / 2 + 2.0 / 2)
+
+    def test_collect_stats_records_min_delay(self):
+        samples = iter([Sample(offset_ms=5.0, delay_ms=9.0), Sample(offset_ms=1.0, delay_ms=3.0)])
+        with patch("kntp.core.query_ntp", side_effect=lambda *a, **k: next(samples)):
+            [stat] = collect_stats(["a.example"], samples=2, sleep_between=0)
+        self.assertEqual(stat.min_delay_ms, 3.0)
+        self.assertEqual(stat.min_delay_offset_ms, 1.0)
+
+    def test_recommend_set_returns_top_servers_without_base(self):
+        stats = [make_stats("base", delay=1.0)] + [
+            make_stats(name, offset=float(i)) for i, name in enumerate("abcd", start=1)
+        ]
+        ranked = rank_servers(stats, base="base")
+        self.assertEqual([r.server for r in recommend_set(ranked, count=3)], ["a", "b", "c"])
+
+    def test_recommend_set_skips_low_ok_rate_and_may_return_fewer(self):
+        stats = [make_stats("base"), make_stats("a", ok=1, fail=4), make_stats("b", offset=5.0)]
+        ranked = rank_servers(stats, base="base")
+        self.assertEqual([r.server for r in recommend_set(ranked, count=3)], ["b"])
+
+    def test_recommend_set_validates_count(self):
+        for bad in (0, 11, True, 2.5):
+            with self.assertRaises(ValueError):
+                recommend_set([], count=bad)
+
+    def test_table_shows_uncertainty_column(self):
+        stats = [make_stats("base"), make_stats("a", offset=1.0)]
+        table = format_ranked_table(rank_servers(stats, base="base"))
+        self.assertIn("±(ms)", table)
+        self.assertIn("10.00", table)
 
 
 if __name__ == "__main__":

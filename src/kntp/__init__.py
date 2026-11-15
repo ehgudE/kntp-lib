@@ -1,4 +1,4 @@
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 from .core import (
     DEFAULT_BASE,
@@ -14,6 +14,7 @@ from .core import (
     query_ntp,
     rank_servers,
     recommend,
+    recommend_set,
 )
 
 __all__ = [
@@ -29,6 +30,7 @@ __all__ = [
     "collect_stats",
     "rank_servers",
     "recommend",
+    "recommend_set",
     "format_ranked_table",
     "grade",
 ]

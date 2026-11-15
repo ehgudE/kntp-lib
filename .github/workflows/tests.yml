@@ -46,7 +46,8 @@ jobs:
             "$RUNNER_TEMP/package-test/bin/python" -m pip install --no-deps "$wheel"
             (
               cd "$RUNNER_TEMP"
-              "$RUNNER_TEMP/package-test/bin/python" -I -c "import kntp; from importlib.metadata import metadata; m = metadata('kntp-lib'); assert kntp.__version__ == m['Version'] == '1.1.0'; assert m['Requires-Python'] == '>=3.11'; assert m['License-Expression'] == 'MIT'; assert 'LICENSE' in str(m.get_all('License-File')); print(kntp.__file__)"
+              "$RUNNER_TEMP/package-test/bin/python" -I -c "import kntp; from importlib.metadata import metadata; m = metadata('kntp-lib'); assert kntp.__version__ == m['Version'] == '1.2.0'; assert m['Requires-Python'] == '>=3.11'; assert m['License-Expression'] == 'MIT'; assert 'LICENSE' in str(m.get_all('License-File')); print(kntp.__file__)"
+              "$RUNNER_TEMP/package-test/bin/kntp" --version
               "$RUNNER_TEMP/package-test/bin/python" -I -m unittest discover -s "$GITHUB_WORKSPACE/tests" -v
             )
             rm -rf "$RUNNER_TEMP/package-test"

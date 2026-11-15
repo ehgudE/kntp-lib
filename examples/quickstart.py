@@ -10,7 +10,10 @@ stats = kntp.collect_stats(
 )
 
 ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE)
-best = kntp.recommend(ranked, require_ok_rate=0.8)
+secondaries = kntp.recommend_set(ranked, count=3, require_ok_rate=0.8)
 
 print(kntp.format_ranked_table(ranked, top_n=5))
-print("\nRecommended:", best.server if best else "None")
+print()
+print("Recommended secondary servers (use together with the base):")
+for item in secondaries:
+    print(f"  {item.server}  vs_base {item.vs_base_ms:+.2f} ms +/- {item.uncertainty_ms:.2f} ms")
