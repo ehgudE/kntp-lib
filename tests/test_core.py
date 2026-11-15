@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from kntp.core import (
     NTP_ERA_SECONDS,
+    NTPKissOfDeathError,
     NTPResponseError,
     Ranked,
     Sample,
@@ -12,6 +13,7 @@ from kntp.core import (
     _validate_ntp_response,
     collect_stats,
     format_ranked_table,
+    query_ntp,
     grade,
     rank_servers,
     recommend,
@@ -26,6 +28,10 @@ def make_response(*, version=4, stratum=1, req_sec=1, req_frac=2, receive=(3, 4)
     struct.pack_into("!II", data, 32, *receive)
     struct.pack_into("!II", data, 40, *transmit)
     return bytes(data)
+
+
+def hosts(n):
+    return [f"s{i}.example" for i in range(n)]
 
 
 class CoreTests(unittest.TestCase):
@@ -95,11 +101,11 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             collect_stats([], samples=1)
         with self.assertRaises(ValueError):
-            collect_stats(["a"] * 65, samples=1)
+            collect_stats(hosts(65), samples=1)
         with self.assertRaises(ValueError):
-            collect_stats(["a"] * 25, samples=10)
+            collect_stats(hosts(25), samples=10)
         with self.assertRaises(ValueError):
-            collect_stats(["a"] * 12, samples=21)
+            collect_stats(hosts(12), samples=21)
         with self.assertRaises(ValueError):
             rank_servers([Stats("base", 1, 0, 0, 0, 1, 0)], base="base", offset_method="median")
         with self.assertRaises(ValueError):
@@ -129,7 +135,7 @@ class CoreTests(unittest.TestCase):
 
     def test_probe_limit_error_suggests_max_samples(self):
         with self.assertRaisesRegex(ValueError, r"samples <= 20 for 12 servers"):
-            collect_stats(["a"] * 12, samples=21)
+            collect_stats(hosts(12), samples=21)
 
     @patch(
         "kntp.core.query_ntp",
@@ -167,6 +173,111 @@ class CoreTests(unittest.TestCase):
     def test_format_ranked_table(self):
         ranked = [Ranked("a", 3, 0, 0, 0, 5, 0, 0.1, 1.2, "A")]
         self.assertIn("a", format_ranked_table(ranked))
+
+    # --- 리뷰에서 찾은 버그 회귀 테스트 ---
+
+    def test_unencodable_host_counts_as_failure_not_abort(self):
+        def fake_query(host, timeout):
+            if host == "bad":
+                raise UnicodeEncodeError("idna", host, 0, 1, "label too long")
+            return Sample(0, 1)
+
+        with patch("kntp.core.query_ntp", side_effect=fake_query):
+            stats = collect_stats(["good", "bad"], samples=2, sleep_between=0)
+        self.assertEqual([(item.server, item.ok) for item in stats], [("good", 2)])
+
+    def test_collect_stats_rejects_single_string(self):
+        with self.assertRaises(ValueError):
+            collect_stats("ntp.kriss.re.kr", samples=1)
+        with self.assertRaises(ValueError):
+            collect_stats(["ok", ""], samples=1)
+
+    def test_collect_stats_deduplicates_servers(self):
+        with patch("kntp.core.query_ntp", return_value=Sample(0, 1)) as mock_query:
+            stats = collect_stats(["s", "s", "t"], samples=2, sleep_between=0)
+        self.assertEqual([(item.server, item.ok) for item in stats], [("s", 2), ("t", 2)])
+        self.assertEqual(mock_query.call_count, 4)
+
+    def test_recommend_skips_custom_base_without_base_argument(self):
+        stats = [Stats("my-base", 5, 0, 0, 0, 1, 0), Stats("other", 5, 0, 30, 0, 1, 0)]
+        best = recommend(rank_servers(stats, base="my-base"))
+        self.assertEqual(best.server, "other")
+
+    def test_recommend_can_pick_kriss_when_it_is_not_the_base(self):
+        stats = [Stats("my-base", 5, 0, 0, 0, 1, 0), Stats("ntp.kriss.re.kr", 5, 0, 0.1, 0, 1, 0)]
+        best = recommend(rank_servers(stats, base="my-base"))
+        self.assertEqual(best.server, "ntp.kriss.re.kr")
+
+    def test_rank_servers_rejects_unreliable_base(self):
+        stats = [Stats("base", 1, 6, 50, 0, 10, 0), Stats("good", 7, 0, 0, 0, 10, 0)]
+        with self.assertRaises(RuntimeError):
+            rank_servers(stats, base="base")
+        ranked = rank_servers(stats, base="base", min_base_ok_rate=0.0)
+        self.assertEqual(len(ranked), 2)
+
+    def test_single_sample_server_gets_jitter_penalty(self):
+        stats = [
+            Stats("base", 5, 0, 0, 0, 10, 0),
+            Stats("stable", 5, 0, 0.5, 2.0, 10, 0),
+            Stats("one-shot", 1, 0, 0.5, 0.0, 10, 0),
+        ]
+        order = [item.server for item in rank_servers(stats, base="base")]
+        self.assertLess(order.index("stable"), order.index("one-shot"))
+
+    def test_kiss_of_death_rate_stops_further_queries(self):
+        with patch("kntp.core.query_ntp", side_effect=NTPKissOfDeathError("RATE")) as mock_query:
+            stats = collect_stats(["s"], samples=5, sleep_between=0)
+        self.assertEqual(mock_query.call_count, 1)
+        self.assertEqual(stats, [])
+
+    def test_kiss_of_death_counts_skipped_rounds_as_failures(self):
+        responses = [Sample(0, 1), NTPKissOfDeathError("DENY")]
+        with patch("kntp.core.query_ntp", side_effect=responses):
+            stats = collect_stats(["s"], samples=4, sleep_between=0)
+        self.assertEqual((stats[0].ok, stats[0].fail), (1, 3))
+
+    def test_validate_reports_kiss_code(self):
+        data = bytearray(make_response(stratum=0))
+        data[12:16] = b"RATE"
+        with self.assertRaises(NTPKissOfDeathError) as ctx:
+            _validate_ntp_response(bytes(data), req_sec=1, req_frac=2)
+        self.assertEqual(ctx.exception.code, "RATE")
+
+    def test_query_ntp_delay_uses_monotonic_clock(self):
+        # 측정 중 벽시계가 10초 뒤로 조정돼도 delay/offset이 튀지 않아야 한다.
+        server_time = 1_800_000_000.0
+
+        class FakeSock:
+            def send(self, packet):
+                self.orig = packet[40:48]
+
+            def recv(self, _size):
+                data = bytearray(48)
+                data[0] = (4 << 3) | 4
+                data[1] = 1
+                data[24:32] = self.orig
+                ntp = server_time + 2_208_988_800
+                sec, frac = int(ntp), int((ntp % 1) * NTP_ERA_SECONDS)
+                struct.pack_into("!IIII", data, 32, sec, frac, sec, frac)
+                return bytes(data)
+
+            def close(self):
+                pass
+
+        wall = iter([server_time - 0.010, server_time - 10.0])
+        mono = iter([100.0, 100.020])
+        with patch("kntp.core._connect_udp", return_value=FakeSock()),              patch("kntp.core.time.time", side_effect=lambda: next(wall)),              patch("kntp.core.time.perf_counter", side_effect=lambda: next(mono)):
+            sample = query_ntp("fake", timeout=1.0)
+        self.assertAlmostEqual(sample.delay_ms, 20.0, places=3)
+        self.assertAlmostEqual(sample.offset_ms, 0.0, places=3)
+
+    def test_format_ranked_table_fits_long_names(self):
+        ranked = [
+            Ranked("very-long-hostname.example.co.kr", 3, 0, 0, 0, 5, 0, 0.1, 1.2, "A"),
+            Ranked("short", 3, 0, 0, 0, 5, 0, 0.1, 1.2, "A"),
+        ]
+        lines = format_ranked_table(ranked).splitlines()
+        self.assertEqual(len({len(line) for line in lines}), 1)
 
 
 if __name__ == "__main__":
