@@ -17,7 +17,9 @@ MAX_SERVERS = 64
 MAX_SAMPLES = 50
 MAX_TIMEOUT = 10.0
 MAX_SLEEP_BETWEEN = 5.0
-MAX_TOTAL_PROBES = 100
+MAX_TOTAL_PROBES = 240  # DEFAULT_SERVERS(12) x 20 samples
+
+OFFSET_METHODS = ("mean", "min_delay")
 
 DEFAULT_BASE = "ntp.kriss.re.kr"
 
@@ -41,6 +43,21 @@ class NTPResponseError(ValueError):
     """Raised when an NTP response is malformed or not trustworthy."""
 
 
+class NTPKissOfDeathError(NTPResponseError):
+    """Raised when the server answers with a Kiss-o'-Death packet (stratum 0).
+
+    ``code`` holds the 4-character kiss code such as ``"RATE"``, ``"DENY"`` or ``"RSTR"``.
+    """
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"NTP Kiss-o'-Death received: {code or '(empty)'}")
+
+
+# 이 kiss code를 받으면 해당 서버에 더 이상 요청하지 않는다 (RFC 5905 7.4).
+STOP_KISS_CODES = frozenset({"RATE", "DENY", "RSTR"})
+
+
 @dataclass(frozen=True)
 class Sample:
     """단일 측정 결과."""
@@ -60,6 +77,8 @@ class Stats:
     std_offset_ms: float
     avg_delay_ms: float
     std_delay_ms: float
+    min_delay_offset_ms: float | None = None
+    """delay가 가장 작았던 샘플의 offset. 경로 지연·비대칭 영향이 가장 적은 값."""
 
 
 @dataclass(frozen=True)
@@ -76,6 +95,8 @@ class Ranked:
     vs_base_ms: float
     score: float
     grade: str
+    base: str | None = None
+    """이 결과를 계산할 때 기준으로 쓴 서버. recommend()가 기준 서버를 건너뛰는 데 사용."""
 
 
 def grade(score: float) -> str:
@@ -114,6 +135,9 @@ def _validate_ntp_response(data: bytes, req_sec: int, req_frac: int) -> None:
         raise NTPResponseError(f"Unsupported NTP version in response: {version}")
     if mode != 4:
         raise NTPResponseError(f"Invalid NTP mode in response: {mode}")
+    if stratum == 0:
+        kiss_code = data[12:16].decode("ascii", errors="replace").rstrip("\x00 ")
+        raise NTPKissOfDeathError(kiss_code)
     if leap == 3:
         raise NTPResponseError("NTP server clock unsynchronized (LI=3)")
     if not 1 <= stratum <= 15:
@@ -171,8 +195,11 @@ def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     struct.pack_into("!II", packet, 40, req_sec, req_frac)
 
     try:
+        # 왕복 시간은 시스템 시각 조정의 영향을 받지 않는 단조 시계로 잰다.
+        p1 = time.perf_counter()
         sock.send(packet)
         data = sock.recv(512)
+        p4 = time.perf_counter()
         t4 = time.time()
     finally:
         sock.close()
@@ -187,7 +214,10 @@ def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     if t3 < t2:
         raise NTPResponseError("NTP transmit timestamp precedes receive timestamp")
 
-    delay = (t4 - t1) - (t3 - t2)
+    delay = (p4 - p1) - (t3 - t2)
+    # offset은 서버 시각과 비교해야 하므로 벽시계(t1, t4)를 쓴다.
+    # t4는 t1 + 실제 경과 시간으로 고정해, 측정 중 시계가 조정돼도 값이 튀지 않게 한다.
+    t4 = t1 + (p4 - p1)
     offset = ((t2 - t1) + (t3 - t4)) / 2
     if not math.isfinite(delay) or not math.isfinite(offset):
         raise NTPResponseError("NTP calculation produced a non-finite value")
@@ -197,19 +227,47 @@ def query_ntp(host: str, timeout: float = 2.0) -> Sample:
     return Sample(offset_ms=offset * 1000.0, delay_ms=max(0.0, delay * 1000.0))
 
 
+def _normalize_servers(servers: list[str]) -> list[str]:
+    """Validate the server list and drop duplicates while keeping order."""
+    if isinstance(servers, (str, bytes)):
+        raise ValueError("servers must be a list of host names, not a single string")
+    try:
+        items = list(servers)
+    except TypeError:
+        raise ValueError("servers must be a list of host names") from None
+    for host in items:
+        if not isinstance(host, str) or not host.strip():
+            raise ValueError("each server must be a non-empty string")
+        if len(host) > 253:
+            raise ValueError(f"server name must be at most 253 characters: {host[:40]}...")
+    return list(dict.fromkeys(items))
+
+
 def collect_stats(
     servers: list[str],
     samples: int = 5,
     timeout: float = 2.0,
     sleep_between: float = 0.5,
 ) -> list[Stats]:
-    """servers 각 서버를 samples번 측정해서 통계를 반환."""
+    """servers 각 서버를 samples번 측정해서 통계를 반환.
+
+    - 중복된 서버는 한 번만 측정한다.
+    - DNS 실패, 타임아웃, 잘못된 응답, 잘못된 형식의 호스트 이름은 해당 서버의 실패로 집계한다.
+    - 서버가 RATE/DENY/RSTR Kiss-o'-Death를 보내면 그 서버에는 더 요청하지 않고,
+      남은 회차는 실패로 집계한다.
+    """
+    servers = _normalize_servers(servers)
     if not 1 <= len(servers) <= MAX_SERVERS:
         raise ValueError(f"servers count must be between 1 and {MAX_SERVERS}")
     if not 1 <= samples <= MAX_SAMPLES:
         raise ValueError(f"samples must be between 1 and {MAX_SAMPLES}")
     if len(servers) * samples > MAX_TOTAL_PROBES:
-        raise ValueError(f"servers * samples must be <= {MAX_TOTAL_PROBES}")
+        max_for_count = MAX_TOTAL_PROBES // len(servers)
+        raise ValueError(
+            f"servers * samples must be <= {MAX_TOTAL_PROBES} "
+            f"(got {len(servers)} * {samples}; use samples <= {max_for_count} "
+            f"for {len(servers)} servers)"
+        )
     if not 0 < timeout <= MAX_TIMEOUT:
         raise ValueError(f"timeout must be > 0 and <= {MAX_TIMEOUT}")
     if not 0 <= sleep_between <= MAX_SLEEP_BETWEEN:
@@ -217,12 +275,22 @@ def collect_stats(
 
     raw: dict[str, list[Sample]] = {s: [] for s in servers}
     fails: dict[str, int] = {s: 0 for s in servers}
+    stopped: set[str] = set()
 
     for i in range(samples):
         for server in servers:
+            if server in stopped:
+                fails[server] += 1
+                continue
             try:
                 raw[server].append(query_ntp(server, timeout=timeout))
-            except (socket.timeout, socket.gaierror, OSError, struct.error, NTPResponseError):
+            except NTPKissOfDeathError as exc:
+                fails[server] += 1
+                if exc.code in STOP_KISS_CODES:
+                    stopped.add(server)
+            except (OSError, struct.error, NTPResponseError, UnicodeError):
+                # OSError는 socket.timeout / socket.gaierror를 포함한다.
+                # UnicodeError는 IDNA로 인코딩할 수 없는 호스트 이름(예: 64자 넘는 label)에서 난다.
                 fails[server] += 1
         if i != samples - 1 and sleep_between > 0:
             time.sleep(sleep_between)
@@ -236,6 +304,7 @@ def collect_stats(
 
         offsets = [sample.offset_ms for sample in raw[server]]
         delays = [sample.delay_ms for sample in raw[server]]
+        best_sample = min(raw[server], key=lambda sample: sample.delay_ms)
         out.append(
             Stats(
                 server=server,
@@ -245,9 +314,15 @@ def collect_stats(
                 std_offset_ms=pstdev(offsets) if ok > 1 else 0.0,
                 avg_delay_ms=mean(delays),
                 std_delay_ms=pstdev(delays) if ok > 1 else 0.0,
+                min_delay_offset_ms=best_sample.offset_ms,
             )
         )
     return out
+
+
+def _ok_rate(ok: int, fail: int) -> float:
+    total = ok + fail
+    return (ok / total) if total > 0 else 0.0
 
 
 def rank_servers(
@@ -258,25 +333,60 @@ def rank_servers(
     w_jitter: float = 0.50,
     max_delay_ms: float | None = 100.0,
     allow_base: bool = True,
+    offset_method: str = "mean",
+    min_base_ok_rate: float = 0.5,
 ) -> list[Ranked]:
-    """기준(base) 대비 점수화해 정렬한 리스트 반환."""
+    """기준(base) 대비 점수화해 정렬한 리스트 반환.
+
+    offset_method:
+        "mean"      - 모든 성공 샘플의 평균 offset으로 기준과 비교(기본값).
+        "min_delay" - delay가 가장 작은 샘플의 offset으로 비교. 혼잡·경로 비대칭으로
+                      튄 샘플의 영향을 줄이며, 일반적인 NTP 클라이언트의 방식에 가깝다.
+
+    min_base_ok_rate:
+        기준 서버의 최소 성공률. 이보다 낮으면 기준값을 믿을 수 없으므로 RuntimeError.
+
+    jitter 항목은 offset 표준편차를 쓴다. 성공 샘플이 1개뿐이면 표준편차를 알 수 없으므로
+    NTP 오차 상한인 delay/2를 대신 쓴다(샘플이 적은 서버가 유리해지지 않도록).
+    """
+    if offset_method not in OFFSET_METHODS:
+        raise ValueError(f"offset_method must be one of {OFFSET_METHODS}")
     if w_delay < 0 or w_jitter < 0:
         raise ValueError("w_delay and w_jitter must be >= 0")
     if max_delay_ms is not None and max_delay_ms <= 0:
         raise ValueError("max_delay_ms must be > 0 when provided")
+    if not 0.0 <= min_base_ok_rate <= 1.0:
+        raise ValueError("min_base_ok_rate must be between 0.0 and 1.0")
 
     base_stat = next((item for item in stats if item.server == base), None)
     if base_stat is None:
         raise RuntimeError(f"Base server '{base}' stats not found (측정 실패/목록 누락).")
+    base_rate = _ok_rate(base_stat.ok, base_stat.fail)
+    if base_rate < min_base_ok_rate:
+        raise RuntimeError(
+            f"Base server '{base}' success rate {base_rate:.0%} is below "
+            f"min_base_ok_rate {min_base_ok_rate:.0%} (기준값을 신뢰할 수 없음)."
+        )
 
+    def offset_of(item: Stats) -> float:
+        if offset_method == "min_delay" and item.min_delay_offset_ms is not None:
+            return item.min_delay_offset_ms
+        return item.avg_offset_ms
+
+    def jitter_of(item: Stats) -> float:
+        if item.ok > 1:
+            return item.std_offset_ms
+        return item.avg_delay_ms / 2
+
+    base_offset = offset_of(base_stat)
     ranked: list[Ranked] = []
     for item in stats:
         if not allow_base and item.server == base:
             continue
-        vs_base = item.avg_offset_ms - base_stat.avg_offset_ms
-        score = abs(vs_base) + (w_delay * item.avg_delay_ms) + (w_jitter * item.std_offset_ms)
         if max_delay_ms is not None and item.avg_delay_ms >= max_delay_ms:
             continue
+        vs_base = offset_of(item) - base_offset
+        score = abs(vs_base) + (w_delay * item.avg_delay_ms) + (w_jitter * jitter_of(item))
         ranked.append(
             Ranked(
                 server=item.server,
@@ -289,6 +399,7 @@ def rank_servers(
                 vs_base_ms=vs_base,
                 score=score,
                 grade=grade(score),
+                base=base,
             )
         )
     ranked.sort(key=lambda item: item.score)
@@ -298,18 +409,21 @@ def rank_servers(
 def recommend(
     ranked: list[Ranked],
     *,
-    base: str = DEFAULT_BASE,
+    base: str | None = None,
     require_ok_rate: float = 0.8,
 ) -> Ranked | None:
-    """랭킹 결과에서 성공률 조건을 만족하는 추천 1개를 반환."""
+    """랭킹 결과에서 성공률 조건을 만족하는 추천 1개를 반환.
+
+    기준 서버는 추천하지 않는다. base를 생략하면 rank_servers()가 각 결과에 기록한
+    기준 서버를 쓰고, 그 기록도 없으면 DEFAULT_BASE를 쓴다.
+    """
     if not 0.0 <= require_ok_rate <= 1.0:
         raise ValueError("require_ok_rate must be between 0.0 and 1.0")
     for item in ranked:
-        if item.server == base:
+        item_base = base if base is not None else (item.base or DEFAULT_BASE)
+        if item.server == item_base:
             continue
-        total = item.ok + item.fail
-        ok_rate = (item.ok / total) if total > 0 else 0.0
-        if ok_rate >= require_ok_rate:
+        if _ok_rate(item.ok, item.fail) >= require_ok_rate:
             return item
     return None
 
@@ -322,11 +436,16 @@ def format_ranked_table(ranked: list[Ranked], *, top_n: int | None = 5) -> str:
     if not rows:
         return "(no ranked results)"
 
-    header = f"{'rank':<4} {'server':<22} {'score':>8} {'grade':>5} {'vs_base(ms)':>12} {'delay(ms)':>10} {'ok/fail':>8}"
+    name_w = max(22, *(len(item.server) for item in rows))
+    header = (
+        f"{'rank':<4} {'server':<{name_w}} {'score':>8} {'grade':>5} "
+        f"{'vs_base(ms)':>12} {'delay(ms)':>10} {'ok/fail':>8}"
+    )
     lines = [header, "-" * len(header)]
     for index, item in enumerate(rows, start=1):
+        ok_fail = f"{item.ok}/{item.fail}"
         lines.append(
-            f"{index:<4} {item.server:<22} {item.score:>8.2f} {item.grade:>5} "
-            f"{item.vs_base_ms:>12.2f} {item.avg_delay_ms:>10.2f} {item.ok:>2}/{item.fail:<5}"
+            f"{index:<4} {item.server:<{name_w}} {item.score:>8.2f} {item.grade:>5} "
+            f"{item.vs_base_ms:>12.2f} {item.avg_delay_ms:>10.2f} {ok_fail:>8}"
         )
     return "\n".join(lines)

@@ -53,6 +53,14 @@ print("추천:", best.server if best else "None")
 
 권장 시작값은 `samples=7`, `timeout=2.0`, `sleep_between=0.3`, `require_ok_rate=0.8`입니다.
 
+### offset 비교 방식
+
+`rank_servers()`는 기본적으로 모든 성공 샘플의 평균 offset(`offset_method="mean"`)으로 기준 서버와 비교합니다. `offset_method="min_delay"`를 주면 서버별로 delay가 가장 작았던 샘플의 offset을 사용합니다. 네트워크 혼잡이나 경로 비대칭으로 튄 샘플의 영향을 줄여 주며, 일반적인 NTP 클라이언트의 샘플 선택 방식에 가깝습니다.
+
+```python
+ranked = kntp.rank_servers(stats, base=kntp.DEFAULT_BASE, offset_method="min_delay")
+```
+
 ## 예외 처리
 
 ```python
@@ -70,16 +78,24 @@ else:
     print("추천 서버:", best.server if best else "없음")
 ```
 
-개별 서버의 DNS, 타임아웃, 잘못된 NTP 응답은 실패 횟수로 집계됩니다. 기준 서버 측정이 모두 실패하면 `rank_servers()`가 `RuntimeError`를 발생시킵니다.
+개별 서버의 DNS 실패, 타임아웃, 잘못된 NTP 응답, 형식이 잘못된 호스트 이름은 그 서버의 실패 횟수로 집계되며 다른 서버의 측정은 계속됩니다. 기준 서버 측정이 모두 실패하거나 성공률이 `min_base_ok_rate`(기본 50%)보다 낮으면 `rank_servers()`가 `RuntimeError`를 발생시킵니다.
+
+### 측정·점수 규칙
+
+- 서버 목록의 중복은 한 번만 측정합니다. 목록 대신 문자열 하나를 넘기면 `ValueError`입니다.
+- 서버가 Kiss-o'-Death(`RATE`, `DENY`, `RSTR`)로 응답하면 그 서버에는 더 요청하지 않고, 남은 회차는 실패로 집계합니다. 공용 NTP 서버의 요청 제한을 존중하기 위한 동작입니다.
+- delay는 시스템 시각 조정의 영향을 받지 않는 단조 시계(`time.perf_counter`)로 잽니다.
+- 성공 샘플이 1개뿐인 서버는 흔들림(jitter)을 알 수 없으므로, 점수 계산에서 jitter 대신 NTP 오차 상한인 `delay / 2`를 씁니다.
+- `recommend()`는 기준 서버를 추천하지 않습니다. `base`를 생략하면 `rank_servers()`에 넘긴 기준 서버를 자동으로 사용합니다.
 
 ## API 제약사항
 
-- 서버 수: 1–64개
+- 서버 수: 1–64개 (중복 제거 후)
 - `samples`: 1–50
-- 서버 수 × `samples`: 최대 100회
+- 서버 수 × `samples`: 최대 240회 (기본 서버 12개 기준 `samples` 최대 20)
 - `timeout`: 0초 초과, 10초 이하
 - `sleep_between`: 0–5초
-- `rank_servers(): w_delay >= 0, w_jitter >= 0, max_delay_ms > 0 또는 None`
+- `rank_servers(): w_delay >= 0, w_jitter >= 0, max_delay_ms > 0 또는 None, offset_method는 "mean" 또는 "min_delay", 0.0 <= min_base_ok_rate <= 1.0`
 - `recommend(): 0.0 <= require_ok_rate <= 1.0`
 - `format_ranked_table(): top_n >= 1 또는 None`
 

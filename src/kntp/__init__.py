@@ -1,8 +1,9 @@
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 from .core import (
     DEFAULT_BASE,
     DEFAULT_SERVERS,
+    NTPKissOfDeathError,
     NTPResponseError,
     Ranked,
     Sample,
@@ -22,6 +23,7 @@ __all__ = [
     "Sample",
     "Stats",
     "NTPResponseError",
+    "NTPKissOfDeathError",
     "Ranked",
     "query_ntp",
     "collect_stats",
