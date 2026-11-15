@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from collections.abc import Sequence
@@ -11,12 +12,15 @@ from collections.abc import Sequence
 from . import __version__
 from .core import (
     DEFAULT_BASE,
+    DEFAULT_MONITOR_INTERVAL,
     DEFAULT_SERVERS,
     MAX_RECOMMEND_COUNT,
     OFFSET_METHODS,
     Ranked,
+    Stats,
     collect_stats,
     format_ranked_table,
+    monitor,
     rank_servers,
     recommend_set,
 )
@@ -35,6 +39,34 @@ def _host(value: str) -> str:
     return value
 
 
+_DURATION_RE = re.compile(r"^(\d+(?:\.\d+)?)([smhd]?)$")
+_UNIT_SECONDS = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(value: str) -> float:
+    """'90', '90s', '30m', '4h', '1d', '1.5h' 형식의 기간을 초로 바꾼다."""
+    match = _DURATION_RE.fullmatch(value.strip().lower())
+    if not match:
+        raise argparse.ArgumentTypeError(
+            f"invalid duration: {value!r} (examples: 30m, 4h, 1d)"
+        )
+    seconds = float(match.group(1)) * _UNIT_SECONDS[match.group(2)]
+    if seconds <= 0:
+        raise argparse.ArgumentTypeError("duration must be greater than 0")
+    return seconds
+
+
+def _human(seconds: float) -> str:
+    seconds = int(round(seconds))
+    hours, rest = divmod(seconds, 3600)
+    minutes, secs = divmod(rest, 60)
+    if hours:
+        return f"{hours}시간 {minutes}분"
+    if minutes:
+        return f"{minutes}분 {secs}초"
+    return f"{secs}초"
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="kntp",
@@ -51,6 +83,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=2.0, help="응답 대기 시간(초) (기본값: 2.0)")
     parser.add_argument("--sleep", type=float, default=0.3, dest="sleep_between",
                         help="측정 회차 사이 대기 시간(초) (기본값: 0.3)")
+    parser.add_argument("-w", "--watch", type=parse_duration, metavar="DURATION",
+                        help="장기 측정 모드: 이 기간 동안 일정 간격으로 측정 (예: 30m, 4h, 1d). "
+                             "Ctrl+C로 중간에 멈추면 그때까지의 결과로 추천")
+    parser.add_argument("--interval", type=float, default=DEFAULT_MONITOR_INTERVAL,
+                        help=f"장기 측정 모드의 측정 간격(초), 16-3600 "
+                             f"(기본값: {DEFAULT_MONITOR_INTERVAL:g})")
     parser.add_argument("-c", "--count", type=int, default=3,
                         help=f"추천할 보조 서버 수, 1-{MAX_RECOMMEND_COUNT} (기본값: 3)")
     parser.add_argument("--offset-method", choices=OFFSET_METHODS, default="mean",
@@ -123,6 +161,35 @@ def format_report(base: str, ranked: Sequence[Ranked], picked: Sequence[Ranked])
     return "\n".join(lines)
 
 
+def _watch(servers: list[str], args: argparse.Namespace) -> tuple[list[Stats], int]:
+    """장기 측정을 실행한다. Ctrl+C로 멈추면 마지막으로 끝난 회차까지의 통계를 쓴다."""
+    rounds = max(1, math.ceil(args.watch / args.interval))
+    count = len(dict.fromkeys(servers))
+    print(
+        f"장기 측정 시작: 서버 {count}개, {args.interval:g}초 간격 {rounds}회 "
+        f"(약 {_human((rounds - 1) * args.interval)}). Ctrl+C로 중간에 멈출 수 있습니다.",
+        file=sys.stderr,
+    )
+    latest: list[tuple[int, list[Stats]]] = []
+
+    def on_round(done: int, total: int, stats: list[Stats]) -> None:
+        latest[:] = [(done, stats)]
+        remaining = (total - done) * args.interval
+        print(f"[{done}/{total}] 응답한 서버 {len(stats)}개, 남은 시간 약 {_human(remaining)}",
+              file=sys.stderr, flush=True)
+
+    try:
+        stats = monitor(servers, rounds=rounds, interval=args.interval, timeout=args.timeout,
+                        on_round=on_round)
+        return stats, rounds
+    except KeyboardInterrupt:
+        if not latest:
+            raise RuntimeError("측정이 끝나기 전에 중단되었습니다 (완료된 회차 없음).") from None
+        done, stats = latest[0]
+        print(f"중단됨: {done}회차까지의 결과로 계산합니다.", file=sys.stderr)
+        return stats, done
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -131,12 +198,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.base not in servers:
         servers.insert(0, args.base)
 
+    rounds_done: int | None = None
     try:
         if not 1 <= args.count <= MAX_RECOMMEND_COUNT:
             raise ValueError(f"--count must be between 1 and {MAX_RECOMMEND_COUNT}")
-        print(f"측정 중: 서버 {len(dict.fromkeys(servers))}개 x {args.samples}회 ...", file=sys.stderr)
-        stats = collect_stats(servers, samples=args.samples, timeout=args.timeout,
-                              sleep_between=args.sleep_between)
+        if args.watch is None:
+            print(f"측정 중: 서버 {len(dict.fromkeys(servers))}개 x {args.samples}회 ...",
+                  file=sys.stderr)
+            stats = collect_stats(servers, samples=args.samples, timeout=args.timeout,
+                                  sleep_between=args.sleep_between)
+        else:
+            stats, rounds_done = _watch(servers, args)
         ranked = rank_servers(stats, base=args.base, max_delay_ms=args.max_delay,
                               offset_method=args.offset_method)
         picked = recommend_set(ranked, count=args.count, require_ok_rate=args.require_ok_rate)
@@ -150,6 +222,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output = json.dumps(
             {
                 "version": __version__,
+                "mode": "watch" if args.watch is not None else "quick",
+                "rounds": rounds_done,
                 "base": args.base,
                 "offset_method": args.offset_method,
                 "ranked": [_to_dict(item) for item in ranked],

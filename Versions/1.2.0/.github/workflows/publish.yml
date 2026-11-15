@@ -1,0 +1,74 @@
+name: publish
+
+# GitHub에서 릴리스를 "Publish"하면 PyPI에 자동 배포한다.
+# PyPI Trusted Publishing(OIDC)을 사용하므로 API 토큰을 저장하지 않는다.
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  PIP_NO_INPUT: "1"
+
+jobs:
+  build:
+    name: Build and verify distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash --noprofile --norc -euo pipefail {0}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.14"
+      - name: Check release tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          # v1.1.0, 1.1.0, v.1.1.0 형식의 태그를 모두 허용한다.
+          tag_version="$(printf '%s' "$RELEASE_TAG" | sed -E 's/^v\.?//')"
+          pkg_version="$(python -c "import tomllib; print(tomllib.load(open('pyproject.toml', 'rb'))['project']['version'])")"
+          init_version="$(python -c "import re; print(re.search(r'__version__ = \"([^\"]+)\"', open('src/kntp/__init__.py', encoding='utf-8').read()).group(1))")"
+          echo "release tag: $RELEASE_TAG -> $tag_version / pyproject: $pkg_version / __init__: $init_version"
+          if [ "$tag_version" != "$pkg_version" ] || [ "$pkg_version" != "$init_version" ]; then
+            echo "::error::Release tag ($RELEASE_TAG) must match pyproject.toml and kntp.__version__ ($pkg_version / $init_version)."
+            exit 1
+          fi
+      - name: Run tests
+        run: PYTHONPATH=src python -m unittest discover -s tests -v
+      - name: Build and check
+        run: |
+          python -m pip install "build==1.6.1" "twine==7.0.0"
+          python -m build
+          python -m twine check --strict dist/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # PyPI의 Trusted Publisher 설정에 같은 환경 이름(pypi)을 입력해야 한다.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/kntp-lib/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
